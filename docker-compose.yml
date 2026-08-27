@@ -139,7 +139,7 @@ services:
       - --token-file
       - /run/secrets/backup_token
       - --instance-id
-      - "${BACKUP_INSTANCE_ID:-production}"
+      - production
       - --interval-seconds
       - "3600"
       - --drill-interval-seconds

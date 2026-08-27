@@ -20,6 +20,9 @@ BACKUP_EVENT_ID_LIMIT = 512
 DEFAULT_MAX_BACKUP_BYTES = 32 * 1024 * 1024
 LEGACY_EVENT_ID_PATTERN = re.compile(r"^legacy_event_([0-9]+)_([0-9a-f]{64})$")
 LEGACY_EVENT_ALIAS_PATTERN = re.compile(r"^local-[0-9]+$")
+SCOPED_LEGACY_EVENT_ALIAS_PATTERN = re.compile(
+    r"^col_[A-Za-z0-9_-]+:(local-[0-9]+)$"
+)
 FRIEND_EXPORT_COLUMNS = (
     "id",
     "username",
@@ -177,8 +180,9 @@ class Store:
             }
             if "previous_event_id" not in event_columns:
                 db.execute("ALTER TABLE status_events ADD COLUMN previous_event_id TEXT")
+            db.execute("DROP INDEX IF EXISTS idx_hosted_events_previous_id")
             db.execute(
-                """CREATE UNIQUE INDEX IF NOT EXISTS idx_hosted_events_previous_id
+                """CREATE INDEX IF NOT EXISTS idx_hosted_events_previous_id
                 ON status_events(tenant_id,previous_event_id)
                 WHERE previous_event_id IS NOT NULL"""
             )
@@ -231,7 +235,7 @@ class Store:
         collectors = db.execute(
             "SELECT id,tenant_id FROM collectors ORDER BY tenant_id,id"
         ).fetchall()
-        semantic_columns = EVENT_EXPORT_COLUMNS[1:]
+        candidates: dict[tuple[str, str], list[sqlite3.Row]] = {}
         for collector in collectors:
             prefix = f"{collector['id']}:"
             rows = db.execute(
@@ -244,27 +248,27 @@ class Store:
                 canonical_id = str(row["client_event_id"])[len(prefix):]
                 if not canonical_id:
                     raise RuntimeError("旧版历史记录包含空的稳定 ID")
-                existing = db.execute(
-                    f"""SELECT {','.join(semantic_columns)} FROM status_events
-                    WHERE tenant_id=? AND client_event_id=?""",
-                    (collector["tenant_id"], canonical_id),
-                ).fetchone()
-                incoming = tuple(row[column] for column in semantic_columns)
-                if existing is None:
-                    db.execute(
-                        """UPDATE status_events SET client_event_id=?
-                        WHERE tenant_id=? AND client_event_id=?""",
-                        (canonical_id, collector["tenant_id"], row["client_event_id"]),
-                    )
-                elif tuple(existing) == incoming:
-                    db.execute(
-                        "DELETE FROM status_events WHERE tenant_id=? AND client_event_id=?",
-                        (collector["tenant_id"], row["client_event_id"]),
-                    )
-                else:
-                    raise RuntimeError(
-                        "旧版历史记录命名空间迁移遇到内容冲突；数据库未被静默改写"
-                    )
+                candidates.setdefault(
+                    (str(collector["tenant_id"]), canonical_id), []
+                ).append(row)
+        for (tenant_id, canonical_id), rows in candidates.items():
+            # ``local-N`` was only unique inside one collector.  It must keep
+            # that scope even when a tenant happens to have a single row today.
+            if LEGACY_EVENT_ALIAS_PATTERN.fullmatch(canonical_id) or len(rows) != 1:
+                continue
+            existing = db.execute(
+                """SELECT 1 FROM status_events
+                WHERE tenant_id=? AND client_event_id=?""",
+                (tenant_id, canonical_id),
+            ).fetchone()
+            if existing is not None:
+                continue
+            row = rows[0]
+            db.execute(
+                """UPDATE status_events SET client_event_id=?
+                WHERE tenant_id=? AND client_event_id=?""",
+                (canonical_id, tenant_id, row["client_event_id"]),
+            )
 
     @staticmethod
     def _export_item(row: Any, columns: tuple[str, ...]) -> dict[str, Any]:
@@ -275,7 +279,10 @@ class Store:
         item = cls._export_item(row, EVENT_EXPORT_COLUMNS)
         previous_event_id = row["previous_event_id"]
         if previous_event_id:
-            item["previous_event_ids"] = [previous_event_id]
+            scoped = SCOPED_LEGACY_EVENT_ALIAS_PATTERN.fullmatch(previous_event_id)
+            item["previous_event_ids"] = [
+                scoped.group(1) if scoped else previous_event_id
+            ]
         return item
 
     @staticmethod
@@ -841,8 +848,23 @@ class Store:
                     self._text(event.get("platform"), 80, "历史平台"),
                     self._text(event.get("source") or source, 80, "历史来源"),
                 )
+                collector_scoped = source != "import" and collector_id != "import"
+                scoped_event_id = (
+                    f"{collector_id}:{event_id}" if collector_scoped else event_id
+                )
+                storage_event_id = (
+                    scoped_event_id
+                    if collector_scoped and LEGACY_EVENT_ALIAS_PATTERN.fullmatch(event_id)
+                    else event_id
+                )
+                stored_aliases = [
+                    f"{collector_id}:{alias}" if collector_scoped else alias
+                    for alias in aliases
+                ]
                 existing_by_id: dict[str, sqlite3.Row] = {}
-                for candidate_id in dict.fromkeys((event_id, *aliases)):
+                for candidate_id in dict.fromkeys(
+                    (storage_event_id, event_id, scoped_event_id, *aliases, *stored_aliases)
+                ):
                     for existing in db.execute(
                         f"""SELECT {','.join(EVENT_DB_EXPORT_COLUMNS)} FROM status_events
                         WHERE tenant_id=? AND (
@@ -852,22 +874,24 @@ class Store:
                     ).fetchall():
                         existing_by_id[str(existing["client_event_id"])] = existing
                 existing_rows = list(existing_by_id.values())
-                if existing_rows:
-                    if any(
-                        tuple(existing[column] for column in EVENT_EXPORT_COLUMNS[1:])
-                        != event_values
-                        for existing in existing_rows
-                    ):
-                        raise ValueError("历史记录稳定 ID 与现有内容冲突")
-                    if len(existing_rows) > 1:
-                        raise ValueError("历史记录新旧稳定 ID 指向了多条现有记录")
+                matching_rows = [
+                    existing
+                    for existing in existing_rows
+                    if tuple(existing[column] for column in EVENT_EXPORT_COLUMNS[1:])
+                    == event_values
+                ]
+                if matching_rows:
                     if aliases:
-                        existing = existing_rows[0]
-                        alias = aliases[0]
+                        existing = next(
+                            (
+                                row for row in matching_rows
+                                if row["client_event_id"] in {storage_event_id, event_id}
+                            ),
+                            matching_rows[0],
+                        )
+                        alias = stored_aliases[0]
                         current_alias = existing["previous_event_id"]
                         if existing["client_event_id"] != alias:
-                            if current_alias and current_alias != alias:
-                                raise ValueError("历史记录旧稳定 ID 与现有映射冲突")
                             if not current_alias:
                                 old_item = self._export_event_item(existing)
                                 db.execute(
@@ -876,12 +900,27 @@ class Store:
                                     (alias, tenant_id, existing["client_event_id"]),
                                 )
                                 new_item = dict(old_item)
-                                new_item["previous_event_ids"] = [alias]
+                                new_item["previous_event_ids"] = [aliases[0]]
                                 event_bytes += (
                                     self._encoded_item_size(new_item)
                                     - self._encoded_item_size(old_item)
                                 )
                     continue
+
+                def identity_is_taken(candidate_id: str) -> bool:
+                    return any(
+                        existing["client_event_id"] == candidate_id
+                        or existing["previous_event_id"] == candidate_id
+                        for existing in existing_rows
+                    )
+
+                if collector_scoped and identity_is_taken(scoped_event_id):
+                    raise ValueError("历史记录稳定 ID 与现有内容冲突")
+                if identity_is_taken(storage_event_id):
+                    if collector_scoped and storage_event_id != scoped_event_id:
+                        storage_event_id = scoped_event_id
+                    else:
+                        raise ValueError("历史记录稳定 ID 与现有内容冲突")
                 if event_count >= self.event_limit:
                     raise ValueError(f"租户历史记录已达到上限（{self.event_limit}）")
                 db.execute(
@@ -891,14 +930,16 @@ class Store:
                     ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     (
                         tenant_id,
-                        event_id,
+                        storage_event_id,
                         *event_values,
-                        aliases[0] if aliases else None,
+                        stored_aliases[0] if stored_aliases else None,
                     ),
                 )
                 accepted += 1
                 event_count += 1
-                event_item = dict(zip(EVENT_EXPORT_COLUMNS, (event_id, *event_values)))
+                event_item = dict(
+                    zip(EVENT_EXPORT_COLUMNS, (storage_event_id, *event_values))
+                )
                 if aliases:
                     event_item["previous_event_ids"] = [aliases[0]]
                 event_bytes += self._encoded_item_size(event_item)
@@ -1227,10 +1268,6 @@ class Store:
                 event_id = (
                     f"legacy_event_{legacy_label}_{hashlib.sha256(identity).hexdigest()}"
                 )
-            if backup_format == BACKUP_FORMAT and version == 1 and ":" in event_id:
-                _, canonical_id = event_id.split(":", 1)
-                if canonical_id:
-                    event_id = canonical_id
             normalized = dict(event)
             normalized["client_event_id"] = event_id
             previous_event_ids = normalized.get("previous_event_ids", [])

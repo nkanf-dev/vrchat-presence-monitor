@@ -49,7 +49,7 @@ class HostedSettingsTests(unittest.TestCase):
                 import_requests=0,
             )
 
-    def test_import_capacity_matches_cloudflare_and_has_a_separate_expanded_limit(self):
+    def test_import_capacity_is_bounded_by_the_container_memory_budget(self):
         with patch.dict(os.environ, {"BOOTSTRAP_TOKEN": "secret"}, clear=True):
             defaults = Settings.from_env()
         self.assertEqual(defaults.max_import_bytes, DEFAULT_MAX_IMPORT_BYTES)
@@ -67,7 +67,15 @@ class HostedSettingsTests(unittest.TestCase):
                 data_dir=Path("/tmp"),
                 static_dir=Path("/tmp"),
                 bootstrap_token="secret",
-                max_import_bytes=91 * 1024 * 1024,
+                max_import_bytes=65 * 1024 * 1024,
+            )
+        with self.assertRaisesRegex(ValueError, "MAX_IMPORT_EXPANDED_BYTES"):
+            Settings(
+                data_dir=Path("/tmp"),
+                static_dir=Path("/tmp"),
+                bootstrap_token="secret",
+                max_import_bytes=32 * 1024 * 1024,
+                max_import_expanded_bytes=65 * 1024 * 1024,
             )
         with self.assertRaisesRegex(ValueError, "MAX_IMPORT_EXPANDED_BYTES"):
             Settings(
@@ -84,6 +92,15 @@ class HostedSettingsTests(unittest.TestCase):
                 bootstrap_token="secret",
                 max_source_expanded_bytes=32 * 1024 * 1024,
             )
+        supported = Settings(
+            data_dir=Path("/tmp"),
+            static_dir=Path("/tmp"),
+            bootstrap_token="secret",
+            max_import_bytes=64 * 1024 * 1024,
+            max_import_expanded_bytes=64 * 1024 * 1024,
+            max_source_expanded_bytes=512 * 1024 * 1024,
+        )
+        self.assertEqual(supported.max_source_expanded_bytes, 512 * 1024 * 1024)
 
 
 if __name__ == "__main__":

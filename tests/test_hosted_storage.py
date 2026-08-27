@@ -262,7 +262,10 @@ class HostedStorageContractTests(unittest.TestCase):
         self.assertEqual(imported["events"], 1)
         self.assertEqual(replayed["events"], 0)
         self.assertEqual(len(exported["status_events"]), 1)
-        self.assertEqual(exported["status_events"][0]["client_event_id"], "local-42")
+        self.assertEqual(
+            exported["status_events"][0]["client_event_id"],
+            f"{self.collector['id']}:local-42",
+        )
 
     def test_arbitrary_event_alias_is_rejected_without_deduplicating_new_data(self):
         assert self.collector is not None
@@ -351,7 +354,7 @@ class HostedStorageContractTests(unittest.TestCase):
         self.assertEqual(exported_event["previous_event_ids"], ["local-42"])
         self.assertEqual(replayed["events"], 0)
 
-    def test_hosted_v1_strips_only_its_outer_namespace_and_v2_preserves_ids(self):
+    def test_hosted_v1_preserves_collector_scope_and_v2_preserves_ids(self):
         assert self.collector is not None
         base = {
             "friends": [
@@ -391,8 +394,8 @@ class HostedStorageContractTests(unittest.TestCase):
             for item in self.store.export_json(self.collector["tenant_id"])["status_events"]
         ]
         self.assertEqual(imported_v1["events"], 1)
-        self.assertEqual(imported_v2["events"], 0)
-        self.assertEqual(event_ids, ["col_legit:event"])
+        self.assertEqual(imported_v2["events"], 1)
+        self.assertEqual(event_ids, ["col_legit:event", "col_old:col_legit:event"])
 
     def test_old_collector_prefix_migration_is_exact_and_runs_only_once(self):
         assert self.collector is not None
@@ -444,6 +447,125 @@ class HostedStorageContractTests(unittest.TestCase):
         ]
         self.assertEqual(first_ids, ["col_legit:event"])
         self.assertIn(future_id, second_ids)
+
+    def test_old_local_ids_from_multiple_collectors_keep_their_scope(self):
+        assert self.collector is not None
+        self.ingest("usr_1", "Alice")
+        second_collector = "col_second"
+        with self.store.connection() as db:
+            db.execute("DELETE FROM schema_meta WHERE key='canonical_event_ids_v2'")
+            db.execute(
+                """INSERT INTO collectors(
+                    id,tenant_id,name,token_hash,created_at
+                ) VALUES(?,?,?,?,?)""",
+                (
+                    second_collector,
+                    self.collector["tenant_id"],
+                    "second",
+                    "f" * 64,
+                    "2026-08-27T12:00:00+00:00",
+                ),
+            )
+            for collector_id, occurred_at in (
+                (self.collector["id"], "2026-08-27T12:00:00+00:00"),
+                (second_collector, "2026-08-27T13:00:00+00:00"),
+            ):
+                db.execute(
+                    """INSERT INTO status_events(
+                        tenant_id,client_event_id,friend_id,occurred_at,old_status,
+                        new_status,location,platform,source
+                    ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        self.collector["tenant_id"],
+                        f"{collector_id}:local-1",
+                        "usr_1",
+                        occurred_at,
+                        "offline",
+                        "active",
+                        "",
+                        "",
+                        "legacy",
+                    ),
+                )
+
+        reopened = Store(self.store.path)
+        event_ids = {
+            item["client_event_id"]
+            for item in reopened.export_json(self.collector["tenant_id"])["status_events"]
+        }
+        self.assertEqual(
+            event_ids,
+            {
+                f"{self.collector['id']}:local-1",
+                f"{second_collector}:local-1",
+            },
+        )
+
+    def test_two_collectors_can_ingest_the_same_local_sequence_number(self):
+        assert self.collector is not None
+        second_collector = "col_second"
+        with self.store.connection() as db:
+            db.execute(
+                """INSERT INTO collectors(
+                    id,tenant_id,name,token_hash,created_at
+                ) VALUES(?,?,?,?,?)""",
+                (
+                    second_collector,
+                    self.collector["tenant_id"],
+                    "second",
+                    "e" * 64,
+                    "2026-08-27T12:00:00+00:00",
+                ),
+            )
+        first_event = {
+            "client_event_id": "local-1",
+            "friend_id": "usr_1",
+            "occurred_at": "2026-08-27T12:00:00+00:00",
+            "old_status": "offline",
+            "new_status": "active",
+        }
+        second_event = {
+            **first_event,
+            "occurred_at": "2026-08-27T13:00:00+00:00",
+            "new_status": "join me",
+        }
+
+        first = self.store.ingest(
+            self.collector["tenant_id"],
+            self.collector["id"],
+            [{"id": "usr_1", "displayName": "Alice"}],
+            [first_event],
+        )
+        second = self.store.ingest(
+            self.collector["tenant_id"],
+            second_collector,
+            [],
+            [second_event],
+        )
+        first_replay = self.store.ingest(
+            self.collector["tenant_id"], self.collector["id"], [], [first_event]
+        )
+        second_replay = self.store.ingest(
+            self.collector["tenant_id"], second_collector, [], [second_event]
+        )
+        event_ids = {
+            item["client_event_id"]
+            for item in self.store.export_json(self.collector["tenant_id"])[
+                "status_events"
+            ]
+        }
+
+        self.assertEqual(first["events"], 1)
+        self.assertEqual(second["events"], 1)
+        self.assertEqual(first_replay["events"], 0)
+        self.assertEqual(second_replay["events"], 0)
+        self.assertEqual(
+            event_ids,
+            {
+                f"{self.collector['id']}:local-1",
+                f"{second_collector}:local-1",
+            },
+        )
 
     def test_maximum_telemetry_event_id_can_be_exported_and_restored(self):
         assert self.collector is not None

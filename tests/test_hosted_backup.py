@@ -162,8 +162,10 @@ class HostedBackupTests(unittest.TestCase):
             'sudo chown "10001:${operator_gid}" .secrets/backup_token', readme
         )
 
-        offsite = compose.split("  offsite-backup:", 1)[1].split("\n  ", 1)[0]
+        offsite = compose.split("  offsite-backup:", 1)[1].split("\nvolumes:", 1)[0]
         self.assertNotIn("/data", offsite)
+        self.assertNotIn("BACKUP_INSTANCE_ID", offsite)
+        self.assertIn("- production", offsite)
 
 
 if __name__ == "__main__":

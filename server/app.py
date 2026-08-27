@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gzip
-import io
 import json
 import logging
 import secrets
@@ -29,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
+from .backup_json import decode_backup as _decode_backup
 from .schemas import BootstrapRequest, LoginRequest, TelemetryRequest
 from .security import (
     LoginRateLimiter,
@@ -49,19 +49,6 @@ from .storage import BACKUP_COMPRESSION_MARGIN, Store
 LOGGER = logging.getLogger("presence_monitor.hosted")
 Model = TypeVar("Model", bound=BaseModel)
 Result = TypeVar("Result")
-
-
-class _DuplicateBackupKey(ValueError):
-    pass
-
-
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateBackupKey(key)
-        result[key] = value
-    return result
 
 
 @dataclass(frozen=True)
@@ -93,32 +80,6 @@ async def _read_model(request: Request, model: Type[Model], maximum: int) -> Mod
         return await run_in_threadpool(model.model_validate_json, raw)
     except ValidationError as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid request") from error
-
-
-def _decode_backup(raw: bytes, maximum_expanded: int) -> dict[str, Any]:
-    """Decode and validate the top-level backup object in a worker thread."""
-    if raw.startswith(b"\x1f\x8b"):
-        try:
-            with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as archive:
-                decoded = archive.read(maximum_expanded + 1)
-        except (EOFError, OSError) as error:
-            raise ValueError("压缩备份文件已损坏") from error
-        if len(decoded) > maximum_expanded:
-            raise ValueError("备份解压后过大")
-    else:
-        decoded = raw
-    try:
-        payload = json.loads(
-            decoded.decode("utf-8"),
-            object_pairs_hook=_unique_object,
-        )
-    except _DuplicateBackupKey as error:
-        raise ValueError("备份文件包含重复字段") from error
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-        raise ValueError("备份文件不是有效 JSON") from error
-    if not isinstance(payload, dict):
-        raise ValueError("备份文件格式无效")
-    return payload
 
 
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:

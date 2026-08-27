@@ -13,6 +13,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import server.app as app_module
+import server.backup_json as backup_json_module
 from server.app import create_app
 from server.settings import Settings
 from server.storage import Store
@@ -417,6 +418,119 @@ class HostedHttpContractTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("重复字段", response.text)
+
+    def test_streaming_decoder_rejects_a_million_tiny_objects_before_materializing_them(self):
+        tiny_objects = b",".join([b"{}"] * 1_000_000)
+        encoded = (
+            b'{"format":"vrchat-monitor-hosted-backup","version":2,'
+            b'"friends":['
+            + tiny_objects
+            + b'],"status_events":[]}'
+        )
+
+        with self.assertRaisesRegex(ValueError, "JSON 对象过多"):
+            app_module._decode_backup(encoded, len(encoded) + 1)
+
+    def test_streaming_decoder_rejects_excessive_depth_with_a_specific_error(self):
+        encoded = (
+            b'{"format":"vrchat-monitor-hosted-backup","version":2,'
+            b'"friends":[],"status_events":[],"padding":'
+            + b"[" * 80
+            + b"0"
+            + b"]" * 80
+            + b"}"
+        )
+
+        with self.assertRaisesRegex(ValueError, "JSON 嵌套层级过深"):
+            app_module._decode_backup(encoded, len(encoded) + 1)
+
+    def test_streaming_decoder_enforces_the_materialized_memory_budget(self):
+        encoded = json.dumps(
+            {
+                "format": "vrchat-monitor-hosted-backup",
+                "version": 2,
+                "friends": [
+                    {"id": f"usr_{index}", "display_name": "x" * 200}
+                    for index in range(20)
+                ],
+                "status_events": [],
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        with patch.object(backup_json_module, "MAX_MATERIALIZED_BYTES", 1024):
+            with self.assertRaisesRegex(ValueError, "JSON 内存放大过高"):
+                app_module._decode_backup(encoded, len(encoded) + 1)
+
+    def test_streaming_limit_failure_does_not_partially_import(self):
+        self.assertEqual(self.login().status_code, 200)
+        tiny_objects = b",".join([b"{}"] * 250_000)
+        encoded = (
+            b'{"format":"vrchat-monitor-hosted-backup","version":2,'
+            b'"friends":[{"id":"usr_must_not_persist","display_name":"Nope"},'
+            + tiny_objects
+            + b'],"status_events":[]}'
+        )
+        response = self.client.post(
+            "/v1/import.json",
+            headers={
+                "Origin": "http://testserver",
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "application/json",
+            },
+            content=encoded,
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("JSON 对象过多", response.text)
+        self.assertEqual(self.client.get("/v1/friends?q=must_not_persist").json()["total"], 0)
+
+    def test_streaming_import_round_trips_a_real_hosted_backup_through_gzip(self):
+        collector = self.store.auth(self.bootstrap["collector_token"], "collector")
+        assert collector is not None
+        self.store.ingest(
+            collector["tenant_id"],
+            collector["id"],
+            [
+                {
+                    "id": "usr_real",
+                    "username": "real-user",
+                    "displayName": "Real User",
+                    "status": "active",
+                    "location": "wrld_real:1",
+                }
+            ],
+            [
+                {
+                    "client_event_id": "event_real_001",
+                    "friend_id": "usr_real",
+                    "occurred_at": "2026-08-28T12:00:00+00:00",
+                    "old_status": "offline",
+                    "new_status": "active",
+                    "location": "wrld_real:1",
+                    "source": "local-bridge",
+                }
+            ],
+        )
+        exported = self.store.export_json(collector["tenant_id"])
+        target = self.store.bootstrap("Restore target", "target bridge")
+        self.assertEqual(self.login(target["access_code"]).status_code, 200)
+
+        response = self.client.post(
+            "/v1/import.json",
+            headers={
+                "Origin": "http://testserver",
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "application/gzip",
+            },
+            content=gzip.compress(
+                json.dumps(exported, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["imported"]["friends"], 1)
+        self.assertEqual(response.json()["imported"]["events"], 1)
 
     def test_export_is_within_the_same_limit_used_for_plain_and_gzip_restore(self):
         self.assertEqual(self.login().status_code, 200)

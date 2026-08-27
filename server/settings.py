@@ -6,9 +6,11 @@ from pathlib import Path
 
 
 DEFAULT_MAX_IMPORT_BYTES = 32 * 1024 * 1024
-MAX_CLOUDFLARE_IMPORT_BYTES = 90 * 1024 * 1024
+MAX_IMPORT_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_IMPORT_EXPANDED_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_SOURCE_EXPANDED_BYTES = 256 * 1024 * 1024
+MAX_IMPORT_EXPANDED_BYTES = 64 * 1024 * 1024
+MAX_SOURCE_EXPANDED_BYTES = 512 * 1024 * 1024
 
 
 def _boolean(value: str, default: bool = False) -> bool:
@@ -66,11 +68,19 @@ class Settings:
             raise ValueError("LOGIN_ATTEMPTS must be between 1 and 100")
         if not 10 <= self.login_window_seconds <= 3600:
             raise ValueError("LOGIN_WINDOW_SECONDS must be between 10 and 3600")
-        if not 1024 <= self.max_import_bytes <= MAX_CLOUDFLARE_IMPORT_BYTES:
+        if not 1024 <= self.max_import_bytes <= MAX_IMPORT_BYTES:
             raise ValueError("MAX_IMPORT_BYTES is outside the supported range")
-        if not self.max_import_bytes <= self.max_import_expanded_bytes <= 512 * 1024 * 1024:
+        if not (
+            self.max_import_bytes
+            <= self.max_import_expanded_bytes
+            <= MAX_IMPORT_EXPANDED_BYTES
+        ):
             raise ValueError("MAX_IMPORT_EXPANDED_BYTES is outside the supported range")
-        if not self.max_import_expanded_bytes <= self.max_source_expanded_bytes <= 512 * 1024 * 1024:
+        if not (
+            self.max_import_expanded_bytes
+            <= self.max_source_expanded_bytes
+            <= MAX_SOURCE_EXPANDED_BYTES
+        ):
             raise ValueError("MAX_SOURCE_EXPANDED_BYTES is outside the supported range")
         if not 1 <= self.import_requests <= 100:
             raise ValueError("IMPORT_REQUESTS must be between 1 and 100")
