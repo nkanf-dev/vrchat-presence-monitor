@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Presence Monitor">
+  <rect width="512" height="512" rx="116" fill="#111822"/>
+  <rect x="74" y="74" width="364" height="364" rx="96" fill="#17231a" stroke="#b6f36b" stroke-width="18"/>
+  <path d="M256 151v210M151 256h210" stroke="#b6f36b" stroke-width="22" stroke-linecap="round" opacity=".28"/>
+  <circle cx="256" cy="151" r="31" fill="#b6f36b"/>
+  <circle cx="361" cy="256" r="31" fill="#67d8f4"/>
+  <circle cx="256" cy="361" r="31" fill="#b6f36b"/>
+  <circle cx="151" cy="256" r="31" fill="#f2a461"/>
+  <circle cx="256" cy="256" r="42" fill="#f3f6f8"/>
+</svg>

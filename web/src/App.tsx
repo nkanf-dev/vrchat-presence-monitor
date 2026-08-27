@@ -6,23 +6,27 @@ import {
   ApiError,
   AUTH_REQUIRED_EVENT,
   type Friend,
+  disconnectVrchat,
   getEvents,
   getFriends,
   getMe,
   getOverview,
   loginVrchat,
   logout,
+  syncNow,
   verifyVrchat2fa,
 } from './api';
 import { AppShell } from './components/AppShell';
 import { FriendDialog } from './components/FriendDialog';
-import { LoadingScreen, LoginScreen, OfflineScreen } from './components/AuthScreens';
+import { LoadingScreen, LoginScreen, OfflineScreen, VrchatReconnectDialog } from './components/AuthScreens';
 import { StatusBanner } from './components/StatusBanner';
-import { useHashView } from './navigation';
+import { useHashView, usePageScrollRestoration } from './navigation';
 import { DataView } from './views/DataView';
 import { HistoryView } from './views/HistoryView';
 import { OverviewView } from './views/OverviewView';
 import { PeopleView } from './views/PeopleView';
+import { DailyView } from './views/DailyView';
+import { WorldsView } from './views/WorldsView';
 
 function InitialContentError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
@@ -41,8 +45,15 @@ function InitialContentError({ message, onRetry }: { message: string; onRetry: (
 function Dashboard({ identity }: { identity: { tenant_id: string; name: string } }) {
   const queryClient = useQueryClient();
   const { view, navigate } = useHashView();
+  usePageScrollRestoration(view);
   const [selectedFriend, setSelectedFriend] = useState<Friend | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [reconnectOpen, setReconnectOpen] = useState(false);
+  const [reconnectTwoFactor, setReconnectTwoFactor] = useState(false);
+  const reconnectMutation = useMutation({ mutationFn: loginVrchat });
+  const reconnectTwoFactorMutation = useMutation({ mutationFn: verifyVrchat2fa });
+  const disconnectMutation = useMutation({ mutationFn: disconnectVrchat });
+  const syncMutation = useMutation({ mutationFn: syncNow });
   const overviewQuery = useQuery({
     queryKey: ['overview'],
     queryFn: getOverview,
@@ -82,6 +93,8 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       queryClient.invalidateQueries({ queryKey: ['overview'] }),
       queryClient.invalidateQueries({ queryKey: ['friends'] }),
       queryClient.invalidateQueries({ queryKey: ['events'] }),
+      queryClient.invalidateQueries({ queryKey: ['analytics'] }),
+      queryClient.invalidateQueries({ queryKey: ['world'] }),
       queryClient.invalidateQueries({ queryKey: ['capabilities'] }),
     ]);
   };
@@ -94,17 +107,41 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       queryClient.removeQueries();
       window.location.hash = '';
       window.location.reload();
-    } catch {
+    } catch (error) {
       setLoggingOut(false);
+      throw error;
+    }
+  };
+
+  const disconnect = async () => {
+    await disconnectMutation.mutateAsync();
+    setReconnectOpen(false);
+    setReconnectTwoFactor(false);
+    await refresh();
+  };
+
+  const syncAndRefresh = async () => {
+    try {
+      await syncMutation.mutateAsync();
+    } catch {
+      // The overview banner reflects the last successful collection while the retry is pending.
+    } finally {
       await refresh();
     }
   };
 
-  const refreshing = activeFetches > 0;
+  const refreshing = activeFetches > 0 || syncMutation.isPending;
   // Preview failures stay inside their own panels. Only the overview request
   // controls the global connection state shown by the shell and banner.
   const refreshFailed = overviewQuery.isError;
-  const viewLabel = { overview: '状态总览', people: '玩家列表', history: '状态历史', data: '数据与备份' }[view];
+  const viewLabel = {
+    overview: '状态总览',
+    daily: '每日在线',
+    worlds: '在线与世界',
+    people: '玩家列表',
+    history: '状态历史',
+    data: '数据与备份',
+  }[view];
 
   return (
     <AppShell
@@ -113,14 +150,26 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       refreshFailed={refreshFailed}
       view={view}
       refreshing={refreshing}
+      accountBusy={loggingOut || disconnectMutation.isPending}
       onNavigate={navigate}
-      onRefresh={() => void refresh()}
-      onLogout={() => void signOut()}
+      onRefresh={() => void syncAndRefresh()}
+      onLogout={signOut}
+      onDisconnect={disconnect}
     >
       <span className="sr-only" role="status" aria-live="polite">已进入{viewLabel}</span>
       {!overviewQuery.isPending &&
         (overviewQuery.data || (overviewQuery.isError && view !== 'overview')) && (
-        <StatusBanner overview={overviewQuery.data} refreshFailed={refreshFailed} onRetry={() => void refresh()} />
+        <StatusBanner
+          overview={overviewQuery.data}
+          refreshFailed={refreshFailed}
+          onRetry={() => void refresh()}
+          onReconnect={() => {
+            reconnectMutation.reset();
+            reconnectTwoFactorMutation.reset();
+            setReconnectTwoFactor(false);
+            setReconnectOpen(true);
+          }}
+        />
       )}
       {view === 'overview' && overviewQuery.isPending ? (
         <section className="dashboard-skeleton" aria-label="正在加载状态总览" aria-busy="true">
@@ -155,10 +204,43 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
           onNavigateHistory={() => navigate('history')}
         />
       ) : null}
+      {view === 'daily' && <DailyView />}
+      {view === 'worlds' && <WorldsView />}
       {view === 'people' && <PeopleView onOpenFriend={setSelectedFriend} />}
       {view === 'history' && <HistoryView />}
       {view === 'data' && <DataView />}
       <FriendDialog friend={selectedFriend} onClose={() => setSelectedFriend(null)} />
+      <VrchatReconnectDialog
+        open={reconnectOpen}
+        pending={reconnectMutation.isPending || reconnectTwoFactorMutation.isPending}
+        error={reconnectTwoFactor ? reconnectTwoFactorMutation.error : reconnectMutation.error}
+        requiresTwoFactor={reconnectTwoFactor}
+        onClose={() => {
+          if (reconnectMutation.isPending || reconnectTwoFactorMutation.isPending) return;
+          setReconnectOpen(false);
+          setReconnectTwoFactor(false);
+        }}
+        onEdit={() => {
+          reconnectMutation.reset();
+          reconnectTwoFactorMutation.reset();
+        }}
+        onLogin={async (credentials) => {
+          const result = await reconnectMutation.mutateAsync(credentials);
+          if (result.requires_2fa) {
+            setReconnectTwoFactor(true);
+            return;
+          }
+          setReconnectOpen(false);
+          setReconnectTwoFactor(false);
+          await refresh();
+        }}
+        onVerify={async (code) => {
+          await reconnectTwoFactorMutation.mutateAsync(code);
+          setReconnectOpen(false);
+          setReconnectTwoFactor(false);
+          await refresh();
+        }}
+      />
     </AppShell>
   );
 }

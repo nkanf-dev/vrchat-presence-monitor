@@ -166,7 +166,7 @@ export function OverviewView({
                 <PersonButton key={friend.id} friend={friend} onOpen={onOpenFriend} />
               ))
             ) : (
-              <EmptyPanel title="还没有玩家快照" copy="bridge 首次上传后，会在这里列出最近的好友状态。" />
+              <EmptyPanel title="还没有玩家快照" copy="云端完成首次采集后，会在这里列出最近的好友状态。" />
             )}
           </div>}
         </section>

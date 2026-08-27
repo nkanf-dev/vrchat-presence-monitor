@@ -119,6 +119,108 @@ const capabilitiesSchema = z.object({
   { message: 'expanded import limits are inconsistent' },
 );
 
+const analyticsStatsSchema = z.object({
+  days: z.number().int().positive(),
+  online_now: z.number().int().nonnegative().default(0),
+  friend_count: z.number().int().nonnegative().default(0),
+  status_counts: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  daily_changes: z.array(z.object({
+    day: z.string(),
+    changes: z.number().int().nonnegative(),
+  })).default([]),
+  online_hours: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    seconds: z.number().nonnegative(),
+    hours: z.number().nonnegative(),
+  })).default([]),
+  online_hours_all: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    seconds: z.number().nonnegative(),
+    hours: z.number().nonnegative(),
+  })).default([]),
+});
+
+const presenceSpanSchema = z.object({
+  start_minute: z.number().min(0).max(1440),
+  end_minute: z.number().min(0).max(1440),
+  status: z.string().default('active'),
+});
+
+const presenceAnalyticsSchema = z.object({
+  day: z.string(),
+  days: z.number().int().positive(),
+  future_clamped: z.boolean().default(false),
+  heatmap_from: z.string(),
+  heatmap_to: z.string(),
+  heatmap_days: z.number().int().nonnegative().optional(),
+  heatmap_observed_minutes: z.array(z.number().nonnegative()).length(24),
+  heatmap_complete_days: z.number().int().nonnegative(),
+  timezone: z.string().default(''),
+  timeline: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    username: z.string().default(''),
+    is_self: z.boolean().default(false),
+    spans: z.array(presenceSpanSchema).default([]),
+    online_minutes: z.number().nonnegative().default(0),
+  })).default([]),
+  heatmap: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    values: z.array(z.number().min(0).max(1)).default([]),
+  })).default([]),
+});
+
+const worldSpanSchema = presenceSpanSchema.extend({
+  location: z.string().default(''),
+  world_id: z.string().default(''),
+  platform: z.string().default(''),
+});
+
+const worldAnalyticsSchema = z.object({
+  day: z.string(),
+  future_clamped: z.boolean().default(false),
+  timezone: z.string().default(''),
+  self_id: z.string().default(''),
+  friends: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    username: z.string().default(''),
+    is_self: z.boolean().default(false),
+    avatar_url: z.string().default(''),
+    online_minutes: z.number().nonnegative().default(0),
+    spans: z.array(worldSpanSchema).default([]),
+  })).default([]),
+  world_ids: z.array(z.string()).default([]),
+});
+
+const optionalMetric = z.union([z.number(), z.string(), z.null()]).optional();
+
+const worldInfoSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().default(''),
+  thumbnail_url: z.string().default(''),
+  image_url: z.string().default(''),
+  author_id: z.string().default(''),
+  author_name: z.string().default(''),
+  capacity: optionalMetric,
+  recommended_capacity: optionalMetric,
+  occupants: optionalMetric,
+  visits: optionalMetric,
+  favorites: optionalMetric,
+  popularity: optionalMetric,
+  heat: optionalMetric,
+  release_status: z.string().default(''),
+  organization: z.string().default(''),
+  tags: z.array(z.string()).default([]),
+  publication_date: z.string().default(''),
+  created_at: z.string().default(''),
+  updated_at: z.string().default(''),
+}).passthrough();
+
 export type Identity = z.infer<typeof identitySchema>;
 export type Me = z.infer<typeof meSchema>;
 export type VrchatLoginSuccess = z.infer<typeof vrchatLoginSuccessSchema>;
@@ -130,6 +232,12 @@ export type FriendPage = z.infer<typeof friendPageSchema>;
 export type EventPage = z.infer<typeof eventPageSchema>;
 export type ImportResult = z.infer<typeof importResultSchema>;
 export type Capabilities = z.infer<typeof capabilitiesSchema>;
+export type AnalyticsStats = z.infer<typeof analyticsStatsSchema>;
+export type PresenceAnalytics = z.infer<typeof presenceAnalyticsSchema>;
+export type PresenceSpan = z.infer<typeof presenceSpanSchema>;
+export type WorldAnalytics = z.infer<typeof worldAnalyticsSchema>;
+export type WorldSpan = z.infer<typeof worldSpanSchema>;
+export type WorldInfo = z.infer<typeof worldInfoSchema>;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -291,6 +399,7 @@ export async function getMe(): Promise<Me> {
   }
 }
 
+/** Legacy API compatibility for existing viewer-session migrations. */
 export const login = (accessCode: string) =>
   request('/v1/login', loginSchema, {
     method: 'POST',
@@ -315,7 +424,48 @@ export const logout = () =>
     body: JSON.stringify({}),
   });
 
+export const disconnectVrchat = () =>
+  request('/v1/vrchat/disconnect', z.object({ ok: z.literal(true) }).passthrough(), {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+
 export const getOverview = () => request('/v1/overview', overviewSchema);
+
+export const getAnalyticsStats = (days = 30) => {
+  const parameters = new URLSearchParams({ days: String(days) });
+  return request(`/v1/analytics/stats?${parameters}`, analyticsStatsSchema);
+};
+
+export const getPresenceAnalytics = (options: {
+  day: string;
+  heatmapFrom: string;
+  heatmapTo: string;
+}) => {
+  const parameters = new URLSearchParams({
+    day: options.day,
+    heatmap_from: options.heatmapFrom,
+    heatmap_to: options.heatmapTo,
+  });
+  return request(`/v1/analytics/presence?${parameters}`, presenceAnalyticsSchema);
+};
+
+export const getWorldAnalytics = (day: string) => {
+  const parameters = new URLSearchParams({ day });
+  return request(`/v1/analytics/worlds?${parameters}`, worldAnalyticsSchema);
+};
+
+export const getWorld = (worldId: string) =>
+  request(`/v1/worlds/${encodeURIComponent(worldId)}`, worldInfoSchema);
+
+export const worldImageUrl = (source: string) =>
+  source ? `/v1/world-image?${new URLSearchParams({ url: source })}` : '';
+
+export const syncNow = () =>
+  request('/v1/sync', z.object({ ok: z.boolean().default(true) }).passthrough(), {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 
 export const getCapabilities = () => request('/v1/capabilities', capabilitiesSchema);
 

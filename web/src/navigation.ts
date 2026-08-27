@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 
-export const views = ['overview', 'people', 'history', 'data'] as const;
+export const views = ['overview', 'daily', 'worlds', 'people', 'history', 'data'] as const;
 export type View = (typeof views)[number];
 
 const readHash = () => window.location.hash.replace(/^#/, '');
@@ -45,8 +45,44 @@ export function useHashView() {
   const view = views.includes(value as View) ? (value as View) : 'overview';
 
   const navigate = (next: View) => {
-    update({ view: next });
+    update({ view: next, y: null });
   };
 
   return { view, navigate };
+}
+
+const replaceScrollPosition = (value: number) => {
+  const parameters = new URLSearchParams(readHash());
+  if (value > 0) parameters.set('y', String(Math.round(value)));
+  else parameters.delete('y');
+  const serialized = parameters.toString();
+  const suffix = serialized ? `#${serialized}` : '';
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${suffix}`);
+};
+
+export function usePageScrollRestoration(view: View) {
+  useLayoutEffect(() => {
+    const value = Number(new URLSearchParams(readHash()).get('y') ?? 0);
+    const top = Number.isFinite(value) ? Math.max(0, value) : 0;
+    const restore = () => window.scrollTo({ top, behavior: 'instant' });
+    const first = window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
+    const delayed = window.setTimeout(restore, 700);
+    return () => {
+      window.cancelAnimationFrame(first);
+      window.clearTimeout(delayed);
+    };
+  }, [view]);
+
+  useEffect(() => {
+    let timer = 0;
+    const remember = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => replaceScrollPosition(window.scrollY), 180);
+    };
+    window.addEventListener('scroll', remember, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', remember);
+      window.clearTimeout(timer);
+    };
+  }, [view]);
 }

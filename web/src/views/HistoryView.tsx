@@ -88,6 +88,7 @@ export function HistoryView() {
               />
             </label>
             <button className="button button-secondary" type="submit">
+              <Search size={16} aria-hidden="true" />
               搜索
             </button>
           </form>
@@ -120,6 +121,7 @@ export function HistoryView() {
                   <th scope="col">变化</th>
                   <th scope="col">位置</th>
                   <th scope="col">设备</th>
+                  <th scope="col">来源</th>
                   <th scope="col">发生时间</th>
                 </tr>
               </thead>
@@ -140,6 +142,7 @@ export function HistoryView() {
                     </td>
                     <td data-label="位置">{locationLabel(event.location, event.new_status)}</td>
                     <td data-label="设备">{platformLabel(event.platform)}</td>
+                    <td data-label="来源">{event.source === 'websocket' ? '实时事件' : 'API 校准'}</td>
                     <td data-label="发生时间">
                       <time dateTime={event.occurred_at}>{formatDateTime(event.occurred_at)}</time>
                     </td>

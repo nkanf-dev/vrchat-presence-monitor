@@ -1,8 +1,9 @@
 import {
+  CalendarRange,
   Database,
   History,
   LayoutDashboard,
-  LogOut,
+  MapPinned,
   RefreshCw,
   Users,
 } from 'lucide-react';
@@ -11,10 +12,13 @@ import type { ReactNode } from 'react';
 import type { Identity, Overview } from '../api';
 import { formatDateTime } from '../format';
 import type { View } from '../navigation';
+import { AccountMenu } from './AccountMenu';
 import { Brand } from './Brand';
 
 const items = [
   { id: 'overview', label: '总览', icon: LayoutDashboard },
+  { id: 'daily', label: '每日', icon: CalendarRange },
+  { id: 'worlds', label: '世界', icon: MapPinned },
   { id: 'people', label: '玩家', icon: Users },
   { id: 'history', label: '历史', icon: History },
   { id: 'data', label: '数据', icon: Database },
@@ -52,9 +56,11 @@ export function AppShell({
   refreshFailed,
   view,
   refreshing,
+  accountBusy,
   onNavigate,
   onRefresh,
   onLogout,
+  onDisconnect,
   children,
 }: {
   identity: Identity;
@@ -62,9 +68,11 @@ export function AppShell({
   refreshFailed: boolean;
   view: View;
   refreshing: boolean;
+  accountBusy: boolean;
   onNavigate: (view: View) => void;
   onRefresh: () => void;
-  onLogout: () => void;
+  onLogout: () => Promise<void> | void;
+  onDisconnect: () => Promise<void> | void;
   children: ReactNode;
 }) {
   const state = refreshFailed ? 'error' : (overview?.collector_state ?? 'never');
@@ -96,10 +104,6 @@ export function AppShell({
               <span>{overview?.last_sync ? formatDateTime(overview.last_sync) : '尚未同步'}</span>
             </div>
           </div>
-          <button className="quiet-action" onClick={onLogout}>
-            <LogOut size={17} aria-hidden="true" />
-            退出这台设备
-          </button>
         </div>
       </aside>
 
@@ -108,15 +112,19 @@ export function AppShell({
           <Brand compact />
           <div className="topbar-copy">
             <span>{identity.name}</span>
-            <strong>远程查看器</strong>
+            <strong>云端状态空间</strong>
           </div>
           <div className="topbar-actions">
             <button className="icon-button" onClick={onRefresh} disabled={refreshing} aria-label="刷新当前数据">
               <RefreshCw className={refreshing ? 'spinning' : ''} size={19} aria-hidden="true" />
             </button>
-            <button className="avatar-menu" onClick={onLogout} aria-label="退出这台设备">
-              {Array.from(identity.name)[0] ?? 'P'}
-            </button>
+            <AccountMenu
+              identity={identity}
+              overview={overview}
+              busy={accountBusy}
+              onLogout={onLogout}
+              onDisconnect={onDisconnect}
+            />
           </div>
         </header>
         <main id="main-content" className="main-content" tabIndex={-1}>

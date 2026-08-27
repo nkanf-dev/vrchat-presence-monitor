@@ -1,0 +1,17 @@
+{
+  "name": "Presence Monitor",
+  "short_name": "Presence",
+  "description": "VRChat 好友在线状态、活动历史与世界时间线",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090c11",
+  "theme_color": "#0a0d12",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { Search, Users } from 'lucide-react';
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { ApiError, type Friend, getFriends } from '../api';
+import { formatSecondsCompact } from '../analytics';
+import { ApiError, type Friend, getAnalyticsStats, getFriends } from '../api';
 import {
   formatDateTime,
   friendName,
@@ -31,6 +32,15 @@ export function PeopleView({ onOpenFriend }: { onOpenFriend: (friend: Friend) =>
     queryKey: ['friends', query, status, page],
     queryFn: () => getFriends({ query, status, limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
   });
+  const stats = useQuery({
+    queryKey: ['analytics', 'stats', 30],
+    queryFn: () => getAnalyticsStats(30),
+    staleTime: 60_000,
+  });
+  const playtime = useMemo(
+    () => new Map((stats.data?.online_hours_all ?? stats.data?.online_hours ?? []).map((item) => [item.id, item.seconds])),
+    [stats.data],
+  );
 
   const pageCount = result.data ? Math.max(1, Math.ceil(result.data.total / PAGE_SIZE)) : null;
   const displayedPageCount = pageCount ?? Math.max(1, page + 1);
@@ -109,6 +119,7 @@ export function PeopleView({ onOpenFriend }: { onOpenFriend: (friend: Friend) =>
               <option value="busy">忙碌</option>
             </select>
             <button className="button button-secondary" type="submit">
+              <Search size={16} aria-hidden="true" />
               搜索
             </button>
           </form>
@@ -141,6 +152,7 @@ export function PeopleView({ onOpenFriend }: { onOpenFriend: (friend: Friend) =>
                   <th scope="col">状态</th>
                   <th scope="col">位置</th>
                   <th scope="col">设备</th>
+                  <th scope="col">近 30 天时长</th>
                   <th scope="col">更新时间</th>
                 </tr>
               </thead>
@@ -170,6 +182,9 @@ export function PeopleView({ onOpenFriend }: { onOpenFriend: (friend: Friend) =>
                       </td>
                       <td data-label="位置">{locationLabel(friend.location, friend.status)}</td>
                       <td data-label="设备">{platformLabel(friend.platform)}</td>
+                      <td data-label="近 30 天时长" className="playtime-cell">
+                        {stats.isPending ? '读取中…' : formatSecondsCompact(playtime.get(friend.id) ?? 0)}
+                      </td>
                       <td data-label="更新时间">
                         <time dateTime={friend.updated_at}>{formatDateTime(friend.updated_at)}</time>
                       </td>
@@ -183,7 +198,7 @@ export function PeopleView({ onOpenFriend }: { onOpenFriend: (friend: Friend) =>
           <div className="empty-state roomy">
             <Users size={28} aria-hidden="true" />
             <strong>{query || status ? '没有匹配的玩家' : '还没有玩家数据'}</strong>
-            <p>{query || status ? '换个关键词或清除筛选后再试。' : 'bridge 第一次上传后，玩家会出现在这里。'}</p>
+            <p>{query || status ? '换个关键词或清除筛选后再试。' : '云端完成首次采集后，玩家会出现在这里。'}</p>
             {(query || status) && (
               <button
                 className="button button-secondary"

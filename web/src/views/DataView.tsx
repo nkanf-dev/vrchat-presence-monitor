@@ -256,7 +256,7 @@ export function DataView() {
           </span>
           <div>
             <h2>导出备份</h2>
-            <p>包含玩家快照与状态历史，不包含访问码、浏览器会话或采集凭据。</p>
+            <p>包含玩家快照与状态历史，不包含浏览器会话或 VRChat 登录信息。</p>
           </div>
           <button
             className="button button-primary"

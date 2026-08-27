@@ -1,5 +1,5 @@
-import { ArrowRight, RefreshCw } from 'lucide-react';
-import { FormEvent, useEffect, useState } from 'react';
+import { ArrowRight, RefreshCw, X } from 'lucide-react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { ApiError } from '../api';
 import { Brand } from './Brand';
@@ -48,21 +48,24 @@ const loginErrorMessage = (error: Error | null, requiresTwoFactor: boolean) => {
   return error.message;
 };
 
-export function LoginScreen({
-  pending,
-  error,
-  requiresTwoFactor,
-  onLogin,
-  onVerify,
-  onEdit,
-}: {
+type LoginFlowProps = {
   pending: boolean;
   error: Error | null;
   requiresTwoFactor: boolean;
   onLogin: (credentials: { username: string; password: string }) => Promise<void>;
   onVerify: (code: string) => Promise<void>;
   onEdit: () => void;
-}) {
+};
+
+function VrchatLoginPanel({
+  pending,
+  error,
+  requiresTwoFactor,
+  onLogin,
+  onVerify,
+  onEdit,
+  reconnect = false,
+}: LoginFlowProps & { reconnect?: boolean }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
@@ -75,13 +78,17 @@ export function LoginScreen({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (requiresTwoFactor) {
-      const value = code.trim();
-      if (value) await onVerify(value);
-      return;
+    try {
+      if (requiresTwoFactor) {
+        const value = code.trim();
+        if (value) await onVerify(value);
+        return;
+      }
+      const account = username.trim();
+      if (account && password) await onLogin({ username: account, password });
+    } catch {
+      // The mutation error is rendered inline by the shared login flow.
     }
-    const account = username.trim();
-    if (account && password) await onLogin({ username: account, password });
   };
 
   const errorMessage = loginErrorMessage(error, requiresTwoFactor);
@@ -89,11 +96,16 @@ export function LoginScreen({
   const canSubmit = requiresTwoFactor ? Boolean(code.trim()) : Boolean(username.trim() && password);
 
   return (
-    <main className="auth-screen">
-      <section className="auth-card" aria-labelledby="login-title">
-        <Brand />
+    <>
         <div className="auth-intro">
-          <h1 id="login-title">{requiresTwoFactor ? '输入验证码' : '登录 VRChat'}</h1>
+          <h1 id={reconnect ? 'reconnect-title' : 'login-title'}>
+            {requiresTwoFactor ? '输入验证码' : reconnect ? '重新连接 VRChat' : '登录 VRChat'}
+          </h1>
+          <p>
+            {reconnect
+              ? '你的面板与历史数据保持不变，重新验证后云端会继续采集。'
+              : '登录后会恢复你的已有空间；关闭或刷新页面不会中断云端采集。'}
+          </p>
         </div>
         <form className="login-form" onSubmit={submit}>
           {requiresTwoFactor ? (
@@ -161,11 +173,51 @@ export function LoginScreen({
             {errorMessage}
           </p>
           <button className="button button-primary button-wide" type="submit" disabled={pending || !canSubmit}>
-            {pending ? '正在登录…' : '登录'}
+            {pending ? '正在连接…' : requiresTwoFactor ? '验证并继续' : reconnect ? '重新连接' : '登录并恢复空间'}
             {!pending && <ArrowRight size={18} aria-hidden="true" />}
           </button>
         </form>
+    </>
+  );
+}
+
+export function LoginScreen(props: LoginFlowProps) {
+  return (
+    <main className="auth-screen">
+      <section className="auth-card" aria-labelledby="login-title">
+        <Brand />
+        <VrchatLoginPanel {...props} />
       </section>
     </main>
+  );
+}
+
+export function VrchatReconnectDialog({
+  open,
+  onClose,
+  ...flow
+}: LoginFlowProps & { open: boolean; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    if (open && !element.open) element.showModal();
+    if (!open && element.open) element.close();
+  }, [open]);
+  return (
+    <dialog
+      className="dialog reconnect-dialog"
+      ref={dialog}
+      aria-labelledby="reconnect-title"
+      onCancel={onClose}
+      onClose={onClose}
+    >
+      <div className="dialog-scroll">
+        <button type="button" className="icon-button dialog-close" onClick={() => dialog.current?.close()} aria-label="关闭重新连接窗口">
+          <X size={20} aria-hidden="true" />
+        </button>
+        <VrchatLoginPanel {...flow} reconnect />
+      </div>
+    </dialog>
   );
 }
