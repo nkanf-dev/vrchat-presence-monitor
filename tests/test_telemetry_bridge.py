@@ -4,7 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.publish_telemetry import collect_events, normalize_event, read_state, validate_urls, write_state
+from scripts.publish_telemetry import (
+    collect_events,
+    collect_legacy_csv,
+    legacy_prefix_digest,
+    normalize_event,
+    read_bridge_state,
+    read_state,
+    validate_urls,
+    write_state,
+)
 
 
 class TelemetryBridgeTests(unittest.TestCase):
@@ -34,6 +43,40 @@ class TelemetryBridgeTests(unittest.TestCase):
             write_state(path, 81)
             self.assertEqual(read_state(path), 81)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_legacy_csv_has_stable_ids_and_append_only_prefix(self):
+        raw = (
+            "friend_id,display_name,occurred_at,old_status,new_status,location,platform,source\n"
+            "usr_1,One,2026-08-27T12:00:00+00:00,offline,active,wrld_1,standalone,api\n"
+            "usr_1,One,2026-08-27T12:00:00+00:00,offline,active,wrld_1,standalone,api\n"
+        ).encode()
+        events = collect_legacy_csv(raw)
+
+        self.assertEqual(len(events), 2)
+        self.assertNotEqual(events[0]["client_event_id"], events[1]["client_event_id"])
+        self.assertEqual(collect_legacy_csv(raw), events)
+        prefix = legacy_prefix_digest(events)
+        extended = collect_legacy_csv(
+            raw
+            + b"usr_2,Two,2026-08-27T12:01:00+00:00,offline,active,private,web,api\n"
+        )
+        self.assertEqual(legacy_prefix_digest(extended, len(events)), prefix)
+
+    def test_legacy_bridge_state_preserves_prefix_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            write_state(
+                path,
+                0,
+                mode="legacy-csv",
+                legacy_count=12,
+                legacy_prefix_sha256="a" * 64,
+            )
+
+            state = read_bridge_state(path)
+            self.assertEqual(state["mode"], "legacy-csv")
+            self.assertEqual(state["legacy_count"], 12)
+            self.assertEqual(state["legacy_prefix_sha256"], "a" * 64)
 
     def test_remote_requires_https_and_local_defaults_to_loopback(self):
         validate_urls("http://127.0.0.1:8842", "https://presence.example")
