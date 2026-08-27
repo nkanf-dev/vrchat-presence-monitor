@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,7 +119,9 @@ def _sqlite_uri(path: Path, *, immutable: bool = False) -> str:
 
 def _inspect_sqlite(path: Path) -> tuple[set[str], str]:
     try:
-        with sqlite3.connect(_sqlite_uri(path, immutable=True), uri=True, timeout=30) as connection:
+        with closing(
+            sqlite3.connect(_sqlite_uri(path, immutable=True), uri=True, timeout=30)
+        ) as connection:
             connection.execute("PRAGMA query_only=ON")
             row = connection.execute("PRAGMA integrity_check").fetchone()
             integrity = str(row[0]) if row else "missing result"
@@ -167,12 +170,21 @@ def create_artifact(
     manifest: Path | None = None
     try:
         try:
-            with sqlite3.connect(_sqlite_uri(source), uri=True, timeout=30) as source_db:
+            with closing(
+                sqlite3.connect(_sqlite_uri(source), uri=True, timeout=30)
+            ) as source_db:
                 source_db.execute("PRAGMA query_only=ON")
-                with sqlite3.connect(snapshot, timeout=30) as destination_db:
+                with closing(sqlite3.connect(snapshot, timeout=30)) as destination_db:
                     source_db.backup(destination_db)
                     destination_db.execute("PRAGMA optimize")
                     destination_db.commit()
+                    journal_mode = destination_db.execute(
+                        "PRAGMA journal_mode=DELETE"
+                    ).fetchone()
+                    if not journal_mode or str(journal_mode[0]).lower() != "delete":
+                        raise BackupValidationError(
+                            "backup snapshot could not be finalized"
+                        )
         except sqlite3.Error as error:
             raise BackupValidationError("SQLite online backup failed") from error
 
@@ -232,7 +244,12 @@ def create_artifact(
             raise
         return BackupArtifact(archive=archive, manifest=manifest, metadata=metadata)
     finally:
-        snapshot.unlink(missing_ok=True)
+        for temporary in (
+            snapshot,
+            snapshot.with_name(f"{snapshot.name}-wal"),
+            snapshot.with_name(f"{snapshot.name}-shm"),
+        ):
+            temporary.unlink(missing_ok=True)
         if archive_temporary is not None:
             archive_temporary.unlink(missing_ok=True)
 
@@ -337,7 +354,9 @@ def verify_artifact(
                 raise BackupValidationError("database checksum does not match the manifest")
             tables, integrity = _inspect_sqlite(restored)
             counts: dict[str, int] = {}
-            with sqlite3.connect(_sqlite_uri(restored, immutable=True), uri=True, timeout=30) as connection:
+            with closing(
+                sqlite3.connect(_sqlite_uri(restored, immutable=True), uri=True, timeout=30)
+            ) as connection:
                 connection.execute("PRAGMA query_only=ON")
                 for table in COUNT_TABLES:
                     if table in tables:

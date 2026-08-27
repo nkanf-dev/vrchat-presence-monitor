@@ -61,6 +61,7 @@ class HostedBackupTests(unittest.TestCase):
             self.assertEqual(artifact.archive.stat().st_mode & 0o777, 0o600)
             self.assertEqual(artifact.manifest.stat().st_mode & 0o777, 0o600)
             self.assertFalse(list(output.glob("*.sqlite3")))
+            self.assertFalse(list(output.glob(".presence-monitor-*")))
 
     def test_corrupt_archive_is_rejected_before_sqlite_is_opened(self):
         with tempfile.TemporaryDirectory() as directory:
