@@ -32,6 +32,15 @@ The application container runs as UID/GID `10001`. Create the bind-mounted
 `backups/` directory with that ownership and mode `0700`; the named `/data`
 volume is initialized with the correct ownership by the image.
 
+Standalone Compose implements file-backed secrets as read-only bind mounts, so
+the host file's numeric ownership is retained instead of being remapped. Keep
+`.secrets/` owned by the operator with mode `0700`. Set bootstrap and R2 backup
+token files to owner UID `10001`, and the tunnel token to owner UID `65532`; use
+the operator's primary GID and mode `0440`. This lets the fixed non-root runtime
+users read only their own token while the operator can still rotate it. A host
+file owned only by the operator with mode `0600` is intentionally rejected by
+the containers rather than weakening their runtime user.
+
 The frontend build uses the official npm registry by default. On a network
 where that endpoint is unavailable, an operator can select a trusted compatible
 registry without editing the Dockerfile; package tarballs are still verified

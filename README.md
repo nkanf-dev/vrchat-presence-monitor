@@ -67,7 +67,9 @@ cd vrchat-presence-monitor
 install -d -m 700 .secrets
 sudo install -d -o 10001 -g 10001 -m 700 backups
 openssl rand -hex 32 > .secrets/bootstrap_token
-chmod 600 .secrets/bootstrap_token
+operator_gid="$(id -g)"
+sudo chown "10001:${operator_gid}" .secrets/bootstrap_token
+sudo chmod 0440 .secrets/bootstrap_token
 docker compose up -d --build vrchat-monitor backup-scheduler
 curl --fail http://127.0.0.1:8080/readyz
 ```
@@ -105,7 +107,9 @@ bridge 从本机的 `/api/state` 与分页历史接口读取标准化数据，�
 
 ```bash
 printf '%s' '替换为 tunnel token' > .secrets/tunnel_token
-chmod 600 .secrets/tunnel_token
+operator_gid="$(id -g)"
+sudo chown "65532:${operator_gid}" .secrets/tunnel_token
+sudo chmod 0440 .secrets/tunnel_token
 docker compose --profile tunnel up -d cloudflared
 ```
 
@@ -128,10 +132,12 @@ npx wrangler login
 npx wrangler r2 bucket create presence-monitor-backups
 npx wrangler r2 bucket lifecycle set presence-monitor-backups --file lifecycle.json
 openssl rand -hex 32 > ../../.secrets/backup_token
-chmod 600 ../../.secrets/backup_token
 npx wrangler secret put BACKUP_TOKEN < ../../.secrets/backup_token
 npx wrangler deploy
 cd ../..
+operator_gid="$(id -g)"
+sudo chown "10001:${operator_gid}" .secrets/backup_token
+sudo chmod 0440 .secrets/backup_token
 
 BACKUP_REMOTE_URL=https://你的-worker地址 \
   docker compose --profile offsite up -d backup-scheduler offsite-backup

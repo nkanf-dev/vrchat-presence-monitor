@@ -41,7 +41,7 @@ services:
         max-file: "3"
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.8.2@sha256:38b3c3029deda0fe5a41b3d312a717c6301c3572d82f03330324236e2f55f644
+    image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
     profiles: ["tunnel"]
     restart: unless-stopped
     command: tunnel --no-autoupdate run

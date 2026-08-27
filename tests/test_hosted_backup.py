@@ -144,6 +144,22 @@ class HostedBackupTests(unittest.TestCase):
         self.assertIn(
             "ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org", dockerfile
         )
+        self.assertIn(
+            "cloudflare/cloudflared:2026.8.2@sha256:"
+            "0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38",
+            compose,
+        )
+
+        readme = (project / "README.md").read_text(encoding="utf-8")
+        self.assertIn(
+            'sudo chown "10001:${operator_gid}" .secrets/bootstrap_token', readme
+        )
+        self.assertIn(
+            'sudo chown "65532:${operator_gid}" .secrets/tunnel_token', readme
+        )
+        self.assertIn(
+            'sudo chown "10001:${operator_gid}" .secrets/backup_token', readme
+        )
 
         offsite = compose.split("  offsite-backup:", 1)[1].split("\n  ", 1)[0]
         self.assertNotIn("/data", offsite)
