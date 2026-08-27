@@ -172,12 +172,18 @@ class Store:
                 state TEXT NOT NULL DEFAULT 'active',
                 last_sync TEXT,
                 last_error TEXT NOT NULL DEFAULT '',
+                credential_updated_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
                 FOREIGN KEY(collector_id) REFERENCES collectors(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_vrchat_accounts_state
                 ON vrchat_accounts(state, updated_at);
+            CREATE TABLE IF NOT EXISTS world_cache (
+                world_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS portable_backup_usage (
                 tenant_id TEXT PRIMARY KEY,
                 friend_count INTEGER NOT NULL DEFAULT 0,
@@ -199,6 +205,15 @@ class Store:
             }
             if "previous_event_id" not in event_columns:
                 db.execute("ALTER TABLE status_events ADD COLUMN previous_event_id TEXT")
+            account_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(vrchat_accounts)").fetchall()
+            }
+            if "credential_updated_at" not in account_columns:
+                db.execute("ALTER TABLE vrchat_accounts ADD COLUMN credential_updated_at TEXT")
+                db.execute(
+                    "UPDATE vrchat_accounts SET credential_updated_at=updated_at "
+                    "WHERE credential_updated_at IS NULL"
+                )
             db.execute("DROP INDEX IF EXISTS idx_hosted_events_previous_id")
             db.execute(
                 """CREATE INDEX IF NOT EXISTS idx_hosted_events_previous_id
@@ -692,13 +707,16 @@ class Store:
             db.execute(
                 """INSERT INTO vrchat_accounts(
                     tenant_id,vrchat_user_id,collector_id,display_name,
-                    encrypted_cookie,state,last_sync,last_error,updated_at
-                ) VALUES(?,?,?,?,?,'active',NULL,'',?)
+                    encrypted_cookie,state,last_sync,last_error,
+                    credential_updated_at,updated_at
+                ) VALUES(?,?,?,?,?,'active',NULL,'',?,?)
                 ON CONFLICT(vrchat_user_id) DO UPDATE SET
                     display_name=excluded.display_name,
                     encrypted_cookie=excluded.encrypted_cookie,
-                    state='active',last_error='',updated_at=excluded.updated_at""",
-                (tenant_id, user_id, collector_id, name, encrypted, stamp),
+                    state='active',last_error='',
+                    credential_updated_at=excluded.credential_updated_at,
+                    updated_at=excluded.updated_at""",
+                (tenant_id, user_id, collector_id, name, encrypted, stamp, stamp),
             )
             db.execute("UPDATE tenants SET name=? WHERE id=?", (name[:120], tenant_id))
             db.execute(
@@ -722,7 +740,7 @@ class Store:
                 dict(row)
                 for row in db.execute(
                     """SELECT tenant_id,vrchat_user_id,collector_id,display_name,
-                        state,last_sync,last_error,updated_at
+                        state,last_sync,last_error,credential_updated_at,updated_at
                     FROM vrchat_accounts
                     WHERE state='active' AND encrypted_cookie IS NOT NULL
                     ORDER BY tenant_id"""
@@ -746,7 +764,7 @@ class Store:
             bytes(row["encrypted_cookie"]),
         )
 
-    def update_vrchat_cookie(self, tenant_id: str, cookie: str) -> None:
+    def update_vrchat_cookie(self, tenant_id: str, cookie: str) -> str:
         if self.session_cipher is None:
             raise RuntimeError("hosted VRChat login is disabled")
         with self.lock, self.connection() as db:
@@ -760,11 +778,13 @@ class Store:
             encrypted = self.session_cipher.encrypt(
                 tenant_id, str(row["vrchat_user_id"]), cookie
             )
+            stamp = now()
             db.execute(
                 """UPDATE vrchat_accounts SET encrypted_cookie=?,state='active',
-                    last_error='',updated_at=? WHERE tenant_id=?""",
-                (encrypted, now(), tenant_id),
+                    last_error='',credential_updated_at=?,updated_at=? WHERE tenant_id=?""",
+                (encrypted, stamp, stamp, tenant_id),
             )
+            return stamp
 
     def mark_vrchat_account_result(
         self,
@@ -835,11 +855,52 @@ class Store:
             return {
                 str(row["id"]): dict(row)
                 for row in db.execute(
-                    """SELECT id,status,location,platform,last_seen,last_changed
+                    f"""SELECT {','.join(FRIEND_EXPORT_COLUMNS)}
                     FROM friends WHERE tenant_id=?""",
                     (tenant_id,),
                 ).fetchall()
             }
+
+    def world_cache_get(
+        self,
+        world_id: str,
+        *,
+        max_age_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
+        with self.lock, self.connection() as db:
+            row = db.execute(
+                "SELECT payload_json,fetched_at FROM world_cache WHERE world_id=?",
+                (world_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        fetched_at = datetime.fromisoformat(str(row["fetched_at"]).replace("Z", "+00:00"))
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        if max_age_seconds is not None and (
+            datetime.now(timezone.utc) - fetched_at.astimezone(timezone.utc)
+        ).total_seconds() > max(0, int(max_age_seconds)):
+            return None
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def world_cache_put(self, world_id: str, payload: dict[str, Any]) -> None:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self.lock, self.connection() as db:
+            db.execute(
+                """INSERT INTO world_cache(world_id,payload_json,fetched_at)
+                VALUES(?,?,?) ON CONFLICT(world_id) DO UPDATE SET
+                payload_json=excluded.payload_json,fetched_at=excluded.fetched_at""",
+                (world_id, encoded, now()),
+            )
 
     def record_raw_fetch(
         self,

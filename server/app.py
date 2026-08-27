@@ -30,6 +30,7 @@ from pydantic import BaseModel, ValidationError
 
 from vrchat_monitor.vrchat import VRChatError, VRChatLoginResult
 
+from .analytics import AnalyticsService, fetch_world_image
 from .backup_json import decode_backup as _decode_backup
 from .hosted_collector import HostedCollectorManager
 from .schemas import (
@@ -110,6 +111,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     if config.hosted_vrchat_login and database.session_cipher is None:
         database.session_cipher = session_cipher
     vrchat_auth = VRChatAuthService(session_cipher) if session_cipher else None
+    analytics = AnalyticsService(database)
     hosted_collector = (
         HostedCollectorManager(
             database,
@@ -145,6 +147,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     )
     app.state.settings = config
     app.state.store = database
+    app.state.analytics = analytics
     app.state.hosted_collector = hosted_collector
 
     @app.exception_handler(HTTPException)
@@ -179,6 +182,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )
         if request.url.path.startswith("/assets/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif request.url.path == "/v1/world-image":
+            response.headers["Cache-Control"] = "public, max-age=86400, immutable"
         else:
             response.headers["Cache-Control"] = "no-store"
         if request_is_secure(request, config):
@@ -440,6 +445,94 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/v1/overview")
     def overview(auth: Authenticated = Depends(viewer)) -> dict[str, Any]:
         return database.overview(auth.row["tenant_id"])
+
+    @app.get("/v1/analytics/stats")
+    def analytics_stats(
+        days: int = Query(default=30, ge=1, le=90),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        return analytics.stats(auth.row["tenant_id"], days)
+
+    @app.get("/v1/analytics/presence")
+    def analytics_presence(
+        day: str | None = Query(default=None, max_length=10),
+        days: int = Query(default=30, ge=1, le=90),
+        heatmap_from: str | None = Query(default=None, max_length=10),
+        heatmap_to: str | None = Query(default=None, max_length=10),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        try:
+            return analytics.presence_overview(
+                auth.row["tenant_id"], day, days, heatmap_from, heatmap_to
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/analytics/worlds")
+    def analytics_worlds(
+        day: str | None = Query(default=None, max_length=10),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        try:
+            return analytics.world_presence_overview(auth.row["tenant_id"], day)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/worlds/{world_id}")
+    def world_info(
+        world_id: str = PathParam(min_length=1, max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        if hosted_collector is None:
+            cached = database.world_cache_get(world_id)
+            if cached is not None:
+                return cached
+            raise HTTPException(status_code=503, detail="世界解析暂不可用")
+        try:
+            return hosted_collector.world_info(auth.row["tenant_id"], world_id)
+        except VRChatError as error:
+            response_status = error.status if error.status in {400, 401, 404, 429} else 502
+            headers = (
+                {"Retry-After": str(max(1, int(error.retry_after or 60)))}
+                if response_status == 429
+                else None
+            )
+            raise HTTPException(
+                status_code=response_status,
+                detail=str(error),
+                headers=headers,
+            ) from error
+
+    @app.get("/v1/world-image")
+    def world_image(
+        url: str = Query(min_length=1, max_length=4096),
+        _: Authenticated = Depends(viewer),
+    ) -> Response:
+        try:
+            body, content_type = fetch_world_image(url)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except VRChatError as error:
+            response_status = error.status if error.status in {413, 415} else 502
+            raise HTTPException(status_code=response_status, detail=str(error)) from error
+        return Response(
+            content=body,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
+
+    @app.post("/v1/sync")
+    def sync_now(
+        request: Request,
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, bool]:
+        require_same_origin(request)
+        if hosted_collector is None:
+            raise HTTPException(status_code=503, detail="托管采集暂不可用")
+        queued = hosted_collector.wake(auth.row["tenant_id"])
+        if not queued:
+            raise HTTPException(status_code=409, detail="尚未连接 VRChat")
+        return {"ok": True, "queued": True}
 
     @app.get("/v1/friends")
     def friends(
