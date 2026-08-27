@@ -4,6 +4,12 @@
   "main": "src/index.js",
   "compatibility_date": "2026-08-27",
   "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "vrc-backup.kanglives.top",
+      "custom_domain": true
+    }
+  ],
   "r2_buckets": [
     {
       "binding": "BACKUPS",

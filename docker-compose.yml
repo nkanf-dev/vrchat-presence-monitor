@@ -11,6 +11,7 @@ services:
       BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap_token
       HOSTED_VRCHAT_LOGIN: "1"
       VRCHAT_SESSION_KEY_FILE: /run/secrets/vrchat_session_key
+      SESSION_DAYS: "${SESSION_DAYS:-365}"
       HOSTED_COLLECTOR_POLL_SECONDS: "${HOSTED_COLLECTOR_POLL_SECONDS:-180}"
       HOSTED_COLLECTOR_CONCURRENCY: "${HOSTED_COLLECTOR_CONCURRENCY:-3}"
       COOKIE_SECURE: always
@@ -87,7 +88,9 @@ services:
       - ./backups:/backups
     read_only: true
     tmpfs:
-      - /tmp:size=32m,mode=1777
+      # Restore verification expands the gzip into /tmp; keep this above the
+      # largest supported SQLite database instead of silently failing at 32 MiB.
+      - /tmp:size=512m,mode=1777
     cap_drop:
       - ALL
     security_opt:
@@ -109,7 +112,7 @@ services:
       - ./backups:/backups
     read_only: true
     tmpfs:
-      - /tmp:size=32m,mode=1777
+      - /tmp:size=512m,mode=1777
     cap_drop:
       - ALL
     security_opt:
