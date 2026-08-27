@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -161,6 +162,68 @@ class Database:
     def _new_record_id(prefix: str) -> str:
         return f"{prefix}_{secrets.token_hex(16)}"
 
+    @staticmethod
+    def _legacy_record_id(prefix: str, legacy_id: Any, identity: tuple[Any, ...]) -> str:
+        encoded = json.dumps(
+            [legacy_id, *identity],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        legacy_label = str(legacy_id)
+        if (
+            not legacy_label
+            or len(legacy_label) > 32
+            or any(
+                character
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                for character in legacy_label
+            )
+        ):
+            legacy_label = hashlib.sha256(
+                legacy_label.encode("utf-8")
+            ).hexdigest()[:16]
+        return f"legacy_{prefix}_{legacy_label}_{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _legacy_row_identity(table: str, row: sqlite3.Row) -> tuple[Any, ...]:
+        if table == "status_events":
+            return tuple(
+                row[column]
+                for column in (
+                    "friend_id",
+                    "occurred_at",
+                    "old_status",
+                    "new_status",
+                    "location",
+                    "platform",
+                    "source",
+                )
+            )
+        if table == "sync_runs":
+            return tuple(
+                row[column]
+                for column in (
+                    "started_at",
+                    "finished_at",
+                    "source",
+                    "status",
+                    "friend_count",
+                    "error",
+                )
+            )
+        if table == "raw_fetches":
+            body = bytes(row["body"] or b"")
+            return (
+                row["occurred_at"],
+                row["method"],
+                row["path"],
+                row["status_code"],
+                row["content_type"],
+                hashlib.sha256(body).hexdigest(),
+                row["error"],
+            )
+        raise ValueError(f"unsupported append-only table: {table}")
+
     @classmethod
     def _migrate_record_ids(
         cls,
@@ -174,25 +237,10 @@ class Database:
         if column not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         for row in db.execute(f"SELECT * FROM {table} WHERE {column}='' ORDER BY id").fetchall():
-            identity: list[list[Any]] = []
-            for name in row.keys():
-                if name == column:
-                    continue
-                value = row[name]
-                if isinstance(value, (bytes, bytearray, memoryview)):
-                    body = bytes(value)
-                    value = {
-                        "bytes": len(body),
-                        "sha256": hashlib.sha256(body).hexdigest(),
-                    }
-                identity.append([name, value])
-            encoded = json.dumps(
-                [table, identity],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            record_id = (
-                f"legacy_{prefix}_{int(row['id'])}_{hashlib.sha256(encoded).hexdigest()}"
+            record_id = cls._legacy_record_id(
+                prefix,
+                int(row["id"]),
+                cls._legacy_row_identity(table, row),
             )
             existing = db.execute(
                 f"SELECT id FROM {table} WHERE {column}=?",
@@ -573,6 +621,51 @@ class Database:
                 (max(0, int(event_id)), limit),
             ).fetchall()]
 
+    def bridge_events(
+        self,
+        after_id: int = 0,
+        checkpoint_event_id: str = "",
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Return an ID-ordered bridge page and detect a restored/rewound database."""
+        after_id = max(0, int(after_id))
+        limit = max(1, min(int(limit), 1000))
+        checkpoint_event_id = str(checkpoint_event_id or "")[:256]
+        with self._lock, self._connection() as db:
+            maximum = int(
+                db.execute("SELECT COALESCE(MAX(id), 0) FROM status_events").fetchone()[0]
+            )
+            checkpoint = None
+            if after_id:
+                checkpoint = db.execute(
+                    "SELECT client_event_id FROM status_events WHERE id=?",
+                    (after_id,),
+                ).fetchone()
+            reset_required = bool(
+                after_id
+                and (
+                    not checkpoint_event_id
+                    or checkpoint is None
+                    or str(checkpoint["client_event_id"] or "") != checkpoint_event_id
+                )
+            )
+            effective_after_id = 0 if reset_required else after_id
+            rows = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT * FROM status_events WHERE id > ? ORDER BY id LIMIT ?",
+                    (effective_after_id, limit),
+                ).fetchall()
+            ]
+        last_id = int(rows[-1]["id"]) if rows else effective_after_id
+        return {
+            "items": rows,
+            "reset_required": reset_required,
+            "effective_after_id": effective_after_id,
+            "max_event_id": maximum,
+            "has_more": last_id < maximum,
+        }
+
     def _online_seconds(self, friend_id: str, start: datetime, end: datetime) -> float:
         with self._lock, self._connection() as db:
             events = [dict(row) for row in db.execute(
@@ -693,19 +786,90 @@ class Database:
                 raise ValueError(f"v2 备份第 {index + 1} 条 {prefix} 记录缺少有效稳定 ID")
             return value
         legacy_id = item.get("id") if item.get("id") is not None else f"row-{index}"
+        return Database._legacy_record_id(prefix, legacy_id, identity)
+
+    @staticmethod
+    def _previous_legacy_record_id(
+        table: str,
+        prefix: str,
+        legacy_id: int,
+        columns: tuple[str, ...],
+        values: tuple[Any, ...],
+    ) -> str:
+        """Reproduce v2 IDs emitted by the first append-only backup release."""
+        encoded_identity: list[list[Any]] = [["id", legacy_id]]
+        for name, value in zip(columns, values, strict=True):
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                body = bytes(value)
+                value = {
+                    "bytes": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                }
+            encoded_identity.append([name, value])
         encoded = json.dumps(
-            [legacy_id, *identity],
+            [table, encoded_identity],
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        legacy_label = str(legacy_id)
-        if (
-            not legacy_label
-            or len(legacy_label) > 32
-            or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in legacy_label)
-        ):
-            legacy_label = hashlib.sha256(legacy_label.encode("utf-8")).hexdigest()[:16]
-        return f"legacy_{prefix}_{legacy_label}_{hashlib.sha256(encoded).hexdigest()}"
+        return f"legacy_{prefix}_{legacy_id}_{hashlib.sha256(encoded).hexdigest()}"
+
+    @classmethod
+    def _backup_record_aliases(
+        cls,
+        version: int,
+        item: dict[str, Any],
+        key: str,
+        table: str,
+        prefix: str,
+        identity: tuple[Any, ...],
+        columns: tuple[str, ...],
+        values: tuple[Any, ...],
+    ) -> tuple[str, ...]:
+        """Map the two released deterministic legacy-ID schemes without merging real duplicates."""
+        if version != 2:
+            return ()
+        record_id = item.get(key)
+        if not isinstance(record_id, str):
+            return ()
+        match = re.fullmatch(
+            rf"legacy_{re.escape(prefix)}_([0-9]+)_[0-9a-f]{{64}}",
+            record_id,
+        )
+        if match is None:
+            return ()
+        legacy_id = int(match.group(1))
+        known_ids = {
+            cls._legacy_record_id(prefix, legacy_id, identity),
+            cls._previous_legacy_record_id(
+                table,
+                prefix,
+                legacy_id,
+                columns,
+                values,
+            ),
+        }
+        if record_id not in known_ids:
+            return ()
+        return tuple(sorted(known_ids - {record_id}))
+
+    @staticmethod
+    def _legacy_row_already_present(
+        db: sqlite3.Connection,
+        table: str,
+        item: dict[str, Any],
+        columns: tuple[str, ...],
+        values: tuple[Any, ...],
+    ) -> bool:
+        legacy_id = item.get("id")
+        if isinstance(legacy_id, bool) or not isinstance(legacy_id, (int, str)):
+            return False
+        if isinstance(legacy_id, str) and not legacy_id.isdigit():
+            return False
+        row = db.execute(
+            f"SELECT {','.join(columns)} FROM {table} WHERE id=?",
+            (int(legacy_id),),
+        ).fetchone()
+        return row is not None and tuple(row) == values
 
     @staticmethod
     def _merge_append_record(
@@ -715,12 +879,14 @@ class Database:
         insert_sql: str,
         record_id: str,
         values: tuple[Any, ...],
+        aliases: tuple[str, ...] = (),
     ) -> int:
-        existing = db.execute(select_sql, (record_id,)).fetchone()
-        if existing is not None:
-            if tuple(existing) != values:
-                raise ValueError(f"备份中的 {label} 稳定 ID 与现有记录内容冲突")
-            return 0
+        for candidate in (record_id, *aliases):
+            existing = db.execute(select_sql, (candidate,)).fetchone()
+            if existing is not None:
+                if tuple(existing) != values:
+                    raise ValueError(f"备份中的 {label} 稳定 ID 与现有记录内容冲突")
+                return 0
         db.execute(insert_sql, (record_id, *values))
         return 1
 
@@ -844,6 +1010,22 @@ class Database:
                     index,
                     values,
                 )
+                if version == 1 and self._legacy_row_already_present(
+                    db,
+                    "status_events",
+                    item,
+                    (
+                        "friend_id",
+                        "occurred_at",
+                        "old_status",
+                        "new_status",
+                        "location",
+                        "platform",
+                        "source",
+                    ),
+                    values,
+                ):
+                    continue
                 imported["status_events"] += self._merge_append_record(
                     db,
                     "状态",
@@ -854,6 +1036,24 @@ class Database:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     record_id,
                     values,
+                    self._backup_record_aliases(
+                        version,
+                        item,
+                        "client_event_id",
+                        "status_events",
+                        "event",
+                        values,
+                        (
+                            "friend_id",
+                            "occurred_at",
+                            "old_status",
+                            "new_status",
+                            "location",
+                            "platform",
+                            "source",
+                        ),
+                        values,
+                    ),
                 )
             for index, item in enumerate(sync_runs):
                 if not item.get("started_at"):
@@ -884,6 +1084,21 @@ class Database:
                     index,
                     values,
                 )
+                if version == 1 and self._legacy_row_already_present(
+                    db,
+                    "sync_runs",
+                    item,
+                    (
+                        "started_at",
+                        "finished_at",
+                        "source",
+                        "status",
+                        "friend_count",
+                        "error",
+                    ),
+                    values,
+                ):
+                    continue
                 imported["sync_runs"] += self._merge_append_record(
                     db,
                     "同步",
@@ -894,6 +1109,23 @@ class Database:
                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     record_id,
                     values,
+                    self._backup_record_aliases(
+                        version,
+                        item,
+                        "client_run_id",
+                        "sync_runs",
+                        "run",
+                        values,
+                        (
+                            "started_at",
+                            "finished_at",
+                            "source",
+                            "status",
+                            "friend_count",
+                            "error",
+                        ),
+                        values,
+                    ),
                 )
             for index, item in enumerate(raw_fetches):
                 if not item.get("occurred_at"):
@@ -931,6 +1163,22 @@ class Database:
                     index,
                     identity,
                 )
+                if version == 1 and self._legacy_row_already_present(
+                    db,
+                    "raw_fetches",
+                    item,
+                    (
+                        "occurred_at",
+                        "method",
+                        "path",
+                        "status_code",
+                        "content_type",
+                        "body",
+                        "error",
+                    ),
+                    values,
+                ):
+                    continue
                 imported["raw_fetches"] += self._merge_append_record(
                     db,
                     "原始响应",
@@ -941,6 +1189,24 @@ class Database:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     record_id,
                     values,
+                    self._backup_record_aliases(
+                        version,
+                        item,
+                        "client_fetch_id",
+                        "raw_fetches",
+                        "fetch",
+                        identity,
+                        (
+                            "occurred_at",
+                            "method",
+                            "path",
+                            "status_code",
+                            "content_type",
+                            "body",
+                            "error",
+                        ),
+                        values,
+                    ),
                 )
         return imported
 

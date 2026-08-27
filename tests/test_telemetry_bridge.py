@@ -11,9 +11,11 @@ from scripts.publish_telemetry import (
     BridgeHTTPError,
     _request_bytes,
     collect_events,
+    collect_checkpointed_events,
     collect_legacy_csv,
     legacy_prefix_digest,
     normalize_event,
+    publish,
     read_bridge_state,
     read_state,
     validate_urls,
@@ -104,9 +106,78 @@ class TelemetryBridgeTests(unittest.TestCase):
     def test_bridge_state_is_private_and_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "state.json"
-            write_state(path, 81)
+            write_state(path, 81, last_event_client_id="event_checkpoint")
             self.assertEqual(read_state(path), 81)
+            self.assertEqual(
+                read_bridge_state(path)["last_event_client_id"],
+                "event_checkpoint",
+            )
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_checkpointed_history_resets_after_a_database_restore(self):
+        calls = []
+
+        def fetch(after_id, checkpoint, limit):
+            calls.append((after_id, checkpoint, limit))
+            return {
+                "reset_required": True,
+                "items": [
+                    {"id": 1, "client_event_id": "event_1"},
+                    {"id": 2, "client_event_id": "event_2"},
+                ],
+                "has_more": False,
+            }
+
+        events, reset = collect_checkpointed_events(fetch, 100, "event_100")
+
+        self.assertTrue(reset)
+        self.assertEqual([event["id"] for event in events], [1, 2])
+        self.assertEqual(calls, [(100, "event_100", 1000)])
+
+    def test_publish_replays_stable_events_and_replaces_a_rewound_cursor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            write_state(path, 100, last_event_client_id="event_old_100")
+            remote_payloads = []
+
+            def request(url, *, payload=None, token="", attempts=4):
+                del token, attempts
+                if url.endswith("/api/state"):
+                    return {"friends": []}
+                if "/api/bridge-events?" in url:
+                    return {
+                        "reset_required": True,
+                        "items": [
+                            {
+                                "id": 1,
+                                "client_event_id": "event_stable_1",
+                                "friend_id": "usr_1",
+                                "occurred_at": "2026-08-27T12:00:00+00:00",
+                                "new_status": "active",
+                            }
+                        ],
+                        "has_more": False,
+                    }
+                if url.endswith("/v1/telemetry"):
+                    remote_payloads.append(payload)
+                    return {"friends": 0, "events": 0, "changed": 0}
+                raise AssertionError(url)
+
+            with patch("scripts.publish_telemetry._json_request", side_effect=request):
+                publish(
+                    "http://127.0.0.1:8842",
+                    "https://presence.example",
+                    "collector-token",
+                    path,
+                )
+
+            self.assertEqual(
+                remote_payloads[0]["events"][0]["client_event_id"],
+                "event_stable_1",
+            )
+            state = read_bridge_state(path)
+            self.assertEqual(state["last_event_id"], 1)
+            self.assertEqual(state["last_event_client_id"], "event_stable_1")
 
     def test_legacy_csv_has_stable_ids_and_append_only_prefix(self):
         raw = (
@@ -148,6 +219,21 @@ class TelemetryBridgeTests(unittest.TestCase):
             validate_urls("http://127.0.0.1:8842", "http://presence.example")
         with self.assertRaisesRegex(ValueError, "本机采集器"):
             validate_urls("http://collector.example", "https://presence.example")
+
+    def test_macos_service_runs_incrementally_without_embedding_the_token(self):
+        project = Path(__file__).resolve().parents[1]
+        template = (
+            project / "ops/com.picoworks.vrchat-presence-bridge.plist.template"
+        ).read_text(encoding="utf-8")
+        installer = (project / "install-vrchat-monitor.command").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("<integer>60</integer>", template)
+        self.assertIn("--token-file", template)
+        self.assertNotIn("PRESENCE_COLLECTOR_TOKEN", template)
+        self.assertIn("stat.S_IMODE(token_file.stat().st_mode) & 0o077", installer)
+        self.assertIn("PRESENCE_REMOTE_URL 必须是有效的 HTTPS 地址", installer)
 
 
 if __name__ == "__main__":

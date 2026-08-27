@@ -31,6 +31,20 @@ class BackupIoTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "解压后过大"):
             decode_backup_upload(compressed, max_compressed_bytes=1024, max_json_bytes=128)
 
+    def test_export_refuses_an_artifact_that_the_importer_cannot_restore(self):
+        with self.assertRaisesRegex(ValueError, "解压上限"):
+            encode_backup_gzip(
+                {"value": "x" * 4096},
+                max_compressed_bytes=1024,
+                max_json_bytes=128,
+            )
+        with self.assertRaisesRegex(ValueError, "文件上限"):
+            encode_backup_gzip(
+                {"value": "incompressible-enough"},
+                max_compressed_bytes=8,
+                max_json_bytes=1024,
+            )
+
     def test_corrupt_gzip_and_invalid_json_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "已损坏"):
             decode_backup_upload(b"\x1f\x8bbroken")

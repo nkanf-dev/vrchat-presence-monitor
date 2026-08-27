@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 
 PageFetcher = Callable[[int, int], dict[str, Any]]
+CheckpointPageFetcher = Callable[[int, str, int], dict[str, Any]]
 EVENT_CHUNK_SIZE = 1_000
 MAX_LOCAL_EXPORT_BYTES = 64 * 1024 * 1024
 MIGRATED_EVENT_ID_PATTERN = re.compile(r"^legacy_event_([0-9]+)_[0-9a-f]{64}$")
@@ -144,6 +145,51 @@ def collect_events(fetch_page: PageFetcher, cursor: int) -> list[dict[str, Any]]
     return sorted(collected, key=lambda item: int(item["id"]))
 
 
+def collect_checkpointed_events(
+    fetch_page: CheckpointPageFetcher,
+    cursor: int,
+    checkpoint_event_id: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Collect ID-ordered events while verifying that the local database did not rewind."""
+    collected: list[dict[str, Any]] = []
+    after_id = max(0, int(cursor))
+    checkpoint = str(checkpoint_event_id or "")
+    reset_required = False
+    first_page = True
+    while True:
+        page = fetch_page(after_id, checkpoint, EVENT_CHUNK_SIZE)
+        page_reset = bool(page.get("reset_required"))
+        if page_reset:
+            if not first_page:
+                raise RuntimeError("读取期间本机历史数据库发生变化，请稍后重试")
+            reset_required = True
+            after_id = 0
+            checkpoint = ""
+        items = page.get("items") if isinstance(page.get("items"), list) else []
+        previous_id = after_id
+        for item in items:
+            if not isinstance(item, dict):
+                raise RuntimeError("本机桥接历史包含无效记录")
+            try:
+                event_id = int(item.get("id", 0))
+            except (TypeError, ValueError) as error:
+                raise RuntimeError("本机桥接历史缺少有效 ID") from error
+            if event_id <= previous_id:
+                raise RuntimeError("本机桥接历史未按 ID 严格递增")
+            if not str(item.get("client_event_id") or "").strip():
+                raise RuntimeError("本机桥接历史缺少稳定事件 ID")
+            collected.append(item)
+            previous_id = event_id
+        if not bool(page.get("has_more")):
+            break
+        if not items:
+            raise RuntimeError("本机桥接历史分页未前进")
+        after_id = previous_id
+        checkpoint = str(items[-1]["client_event_id"])
+        first_page = False
+    return collected, reset_required
+
+
 def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     supplied_id = str(event.get("client_event_id") or "").strip()
     row_id = str(event.get("id") if event.get("id") is not None else "")
@@ -220,6 +266,7 @@ def read_bridge_state(path: Path) -> dict[str, Any]:
         return {
             "mode": mode if mode in {"paged", "legacy-csv"} else "paged",
             "last_event_id": max(0, int(payload.get("last_event_id", 0))),
+            "last_event_client_id": str(payload.get("last_event_client_id") or ""),
             "legacy_count": max(0, int(payload.get("legacy_count", 0))),
             "legacy_prefix_sha256": str(payload.get("legacy_prefix_sha256") or ""),
         }
@@ -238,6 +285,7 @@ def write_state(
     mode: str = "paged",
     legacy_count: int = 0,
     legacy_prefix_sha256: str = "",
+    last_event_client_id: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".bridge-state-", dir=path.parent)
@@ -245,9 +293,10 @@ def write_state(
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(
                 {
-                    "version": 2,
+                    "version": 3,
                     "mode": mode,
                     "last_event_id": max(0, int(last_event_id)),
+                    "last_event_client_id": str(last_event_client_id or "")[:256],
                     "legacy_count": max(0, int(legacy_count)),
                     "legacy_prefix_sha256": str(legacy_prefix_sha256),
                 },
@@ -277,19 +326,47 @@ def publish(local_url: str, remote_url: str, token: str, state_path: Path) -> di
     friends = state.get("friends") if isinstance(state.get("friends"), list) else []
     bridge_state = read_bridge_state(state_path)
     cursor = int(bridge_state.get("last_event_id", 0))
+    checkpoint_event_id = str(bridge_state.get("last_event_client_id") or "")
 
     def fetch_page(offset: int, limit: int) -> dict[str, Any]:
         return _json_request(f"{local}/api/history?offset={offset}&limit={limit}")
 
     legacy_mode = bridge_state.get("mode") == "legacy-csv"
     legacy_events: list[dict[str, Any]] = []
+    cursor_reset = False
     if not legacy_mode:
         try:
-            events = collect_events(fetch_page, cursor)
+            def fetch_checkpoint_page(
+                after_id: int,
+                checkpoint: str,
+                limit: int,
+            ) -> dict[str, Any]:
+                query = urllib.parse.urlencode(
+                    {
+                        "after_id": after_id,
+                        "checkpoint_event_id": checkpoint,
+                        "limit": limit,
+                    }
+                )
+                return _json_request(f"{local}/api/bridge-events?{query}")
+
+            events, cursor_reset = collect_checkpointed_events(
+                fetch_checkpoint_page,
+                cursor,
+                checkpoint_event_id,
+            )
+            if cursor_reset:
+                cursor = 0
+                checkpoint_event_id = ""
         except BridgeHTTPError as error:
             if error.status_code != 404:
                 raise
-            legacy_mode = True
+            try:
+                events = collect_events(fetch_page, cursor)
+            except BridgeHTTPError as history_error:
+                if history_error.status_code != 404:
+                    raise
+                legacy_mode = True
     if legacy_mode:
         raw_csv = _request_bytes(
             f"{local}/api/export.csv",
@@ -312,12 +389,13 @@ def publish(local_url: str, remote_url: str, token: str, state_path: Path) -> di
         for index in range(0, len(events), EVENT_CHUNK_SIZE)
     ] or [[]]
     for index, chunk in enumerate(chunks):
+        normalized_chunk = [normalize_event(event) for event in chunk]
         result = _json_request(
             f"{remote}/v1/telemetry",
             payload={
                 "schema_version": 1,
                 "friends": friends if index == 0 else [],
-                "events": [normalize_event(event) for event in chunk],
+                "events": normalized_chunk,
             },
             token=token,
         )
@@ -325,7 +403,18 @@ def publish(local_url: str, remote_url: str, token: str, state_path: Path) -> di
             totals[key] += int(result.get(key, 0))
         if chunk and not legacy_mode:
             cursor = max(cursor, max(int(event["id"]) for event in chunk))
-            write_state(state_path, cursor)
+            checkpoint_event_id = next(
+                normalized["client_event_id"]
+                for event, normalized in zip(chunk, normalized_chunk, strict=True)
+                if int(event["id"]) == cursor
+            )
+            write_state(
+                state_path,
+                cursor,
+                last_event_client_id=checkpoint_event_id,
+            )
+    if cursor_reset and not events and not legacy_mode:
+        write_state(state_path, 0, last_event_client_id="")
     if legacy_mode:
         write_state(
             state_path,

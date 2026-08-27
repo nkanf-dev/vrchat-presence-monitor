@@ -23,14 +23,29 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def encode_backup_gzip(payload: dict[str, Any]) -> bytes:
-    """Encode a backup without materialising a second uncompressed JSON copy."""
+def encode_backup_gzip(
+    payload: dict[str, Any],
+    *,
+    max_compressed_bytes: int = MAX_COMPRESSED_BACKUP_BYTES,
+    max_json_bytes: int = MAX_JSON_BACKUP_BYTES,
+) -> bytes:
+    """Encode a backup only when the same local importer can restore it."""
+    if max_compressed_bytes < 1 or max_json_bytes < 1:
+        raise ValueError("备份容量上限无效")
     output = io.BytesIO()
     encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    json_bytes = 0
     with gzip.GzipFile(fileobj=output, mode="wb", compresslevel=6, mtime=0) as archive:
         for chunk in encoder.iterencode(payload):
-            archive.write(chunk.encode("utf-8"))
-    return output.getvalue()
+            encoded = chunk.encode("utf-8")
+            json_bytes += len(encoded)
+            if json_bytes > max_json_bytes:
+                raise ValueError("备份数据超过可恢复的解压上限")
+            archive.write(encoded)
+    result = output.getvalue()
+    if len(result) > max_compressed_bytes:
+        raise ValueError("压缩备份超过可恢复的文件上限")
+    return result
 
 
 def decode_backup_upload(

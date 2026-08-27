@@ -35,6 +35,16 @@ class LocalHttpSecurityTests(unittest.TestCase):
         self.assertNotIn("/api/world-image", (root / "vrchat_monitor/app.py").read_text())
         self.assertNotIn("/api/world-image", (root / "vrchat_monitor/static/app.js").read_text())
 
+    def test_local_exports_report_failures_without_leaving_the_dashboard(self):
+        root = Path(__file__).resolve().parents[1]
+        app = (root / "vrchat_monitor/static/app.js").read_text()
+        page = (root / "vrchat_monitor/static/index.html").read_text()
+
+        self.assertNotIn("window.location='/api/export", app)
+        self.assertIn("downloadExport('/api/export.json'", app)
+        self.assertIn("toast(`导出失败：${error.message}`, 120000, true)", app)
+        self.assertIn('id="toast" role="alert" aria-live="assertive"', page)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 from vrchat_monitor.db import Database
 
@@ -144,7 +145,7 @@ class ImportExportHistoryTests(unittest.TestCase):
     def test_existing_append_only_rows_receive_stable_deterministic_ids(self):
         with tempfile.TemporaryDirectory() as directory:
             path = f"{directory}/legacy.sqlite3"
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.executescript(
                     """
                     CREATE TABLE status_events (
@@ -222,6 +223,267 @@ class ImportExportHistoryTests(unittest.TestCase):
                 id_sets["run"],
             )
 
+    def test_previously_upgraded_rows_do_not_duplicate_when_importing_v1_backup(self):
+        payload = {
+            "format": "vrchat-monitor-backup",
+            "version": 1,
+            "friends": [
+                {
+                    "id": "usr_1",
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "updated_at": "2026-08-27T12:00:00+00:00",
+                }
+            ],
+            "status_events": [
+                {
+                    "id": 1,
+                    "friend_id": "usr_1",
+                    "occurred_at": "2026-08-27T12:01:00+00:00",
+                    "old_status": "offline",
+                    "new_status": "active",
+                    "location": "wrld_example",
+                    "platform": "standalonewindows",
+                    "source": "api",
+                }
+            ],
+            "sync_runs": [
+                {
+                    "id": 1,
+                    "started_at": "2026-08-27T12:00:00+00:00",
+                    "finished_at": "2026-08-27T12:02:00+00:00",
+                    "source": "api",
+                    "status": "ok",
+                    "friend_count": 1,
+                    "error": "",
+                }
+            ],
+            "raw_fetches": [
+                {
+                    "id": 1,
+                    "occurred_at": "2026-08-27T12:00:30+00:00",
+                    "method": "GET",
+                    "path": "/auth/user",
+                    "status_code": 200,
+                    "content_type": "application/json",
+                    "body_b64": "e30=",
+                    "error": "",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/previously-upgraded.sqlite3"
+            db = Database(path)
+            db.json_import({
+                "format": "vrchat-monitor-backup",
+                "version": 2,
+                "friends": payload["friends"],
+                "status_events": [
+                    {
+                        **payload["status_events"][0],
+                        "client_event_id": "legacy_event_from_previous_release",
+                    }
+                ],
+                "sync_runs": [
+                    {
+                        **payload["sync_runs"][0],
+                        "client_run_id": "legacy_run_from_previous_release",
+                    }
+                ],
+                "raw_fetches": [
+                    {
+                        **payload["raw_fetches"][0],
+                        "client_fetch_id": "legacy_fetch_from_previous_release",
+                    }
+                ],
+            })
+
+            before = db.json_export()
+            imported = db.json_import(payload)
+            after = db.json_export()
+
+            self.assertEqual(
+                imported,
+                {"friends": 0, "status_events": 0, "sync_runs": 0, "raw_fetches": 0},
+            )
+            self.assertEqual(len(after["status_events"]), len(before["status_events"]))
+            self.assertEqual(len(after["sync_runs"]), len(before["sync_runs"]))
+            self.assertEqual(len(after["raw_fetches"]), len(before["raw_fetches"]))
+
+            fresh = Database(f"{directory}/fresh.sqlite3")
+            self.assertEqual(fresh.json_import(payload)["status_events"], 1)
+            expected_event_id = Database._legacy_record_id(
+                "event",
+                1,
+                (
+                    "usr_1",
+                    "2026-08-27T12:01:00+00:00",
+                    "offline",
+                    "active",
+                    "wrld_example",
+                    "standalonewindows",
+                    "api",
+                ),
+            )
+            self.assertEqual(
+                fresh.json_export()["status_events"][0]["client_event_id"],
+                expected_event_id,
+            )
+
+    def test_previous_and_current_v2_legacy_ids_merge_in_both_orders(self):
+        friend = {
+            "id": "usr_1",
+            "username": "alice",
+            "display_name": "Alice",
+            "updated_at": "2026-08-27T12:00:00+00:00",
+        }
+        event_values = (
+            "usr_1",
+            "2026-08-27T12:01:00+00:00",
+            "offline",
+            "active",
+            "wrld_example",
+            "standalonewindows",
+            "api",
+        )
+        run_values = (
+            "2026-08-27T12:00:00+00:00",
+            "2026-08-27T12:02:00+00:00",
+            "api",
+            "ok",
+            1,
+            "",
+        )
+        body = b'{}'
+        fetch_values = (
+            "2026-08-27T12:00:30+00:00",
+            "GET",
+            "/auth/user",
+            200,
+            "application/json",
+            body,
+            "",
+        )
+        fetch_identity = (
+            *fetch_values[:5],
+            hashlib.sha256(body).hexdigest(),
+            fetch_values[6],
+        )
+
+        def previous_id(
+            table: str,
+            prefix: str,
+            columns: tuple[str, ...],
+            values: tuple[object, ...],
+        ) -> str:
+            identity = [["id", 7]]
+            for name, value in zip(columns, values, strict=True):
+                if isinstance(value, bytes):
+                    value = {
+                        "bytes": len(value),
+                        "sha256": hashlib.sha256(value).hexdigest(),
+                    }
+                identity.append([name, value])
+            encoded = json.dumps(
+                [table, identity], ensure_ascii=False, separators=(",", ":")
+            ).encode()
+            return f"legacy_{prefix}_7_{hashlib.sha256(encoded).hexdigest()}"
+
+        columns = {
+            "event": (
+                "friend_id",
+                "occurred_at",
+                "old_status",
+                "new_status",
+                "location",
+                "platform",
+                "source",
+            ),
+            "run": (
+                "started_at",
+                "finished_at",
+                "source",
+                "status",
+                "friend_count",
+                "error",
+            ),
+            "fetch": (
+                "occurred_at",
+                "method",
+                "path",
+                "status_code",
+                "content_type",
+                "body",
+                "error",
+            ),
+        }
+
+        def backup(current: bool) -> dict[str, object]:
+            return {
+                "format": "vrchat-monitor-backup",
+                "version": 2,
+                "friends": [friend],
+                "status_events": [{
+                    "id": 7,
+                    "client_event_id": (
+                        Database._legacy_record_id("event", 7, event_values)
+                        if current
+                        else previous_id("status_events", "event", columns["event"], event_values)
+                    ),
+                    "friend_id": event_values[0],
+                    "occurred_at": event_values[1],
+                    "old_status": event_values[2],
+                    "new_status": event_values[3],
+                    "location": event_values[4],
+                    "platform": event_values[5],
+                    "source": event_values[6],
+                }],
+                "sync_runs": [{
+                    "id": 7,
+                    "client_run_id": (
+                        Database._legacy_record_id("run", 7, run_values)
+                        if current
+                        else previous_id("sync_runs", "run", columns["run"], run_values)
+                    ),
+                    "started_at": run_values[0],
+                    "finished_at": run_values[1],
+                    "source": run_values[2],
+                    "status": run_values[3],
+                    "friend_count": run_values[4],
+                    "error": run_values[5],
+                }],
+                "raw_fetches": [{
+                    "id": 7,
+                    "client_fetch_id": (
+                        Database._legacy_record_id("fetch", 7, fetch_identity)
+                        if current
+                        else previous_id("raw_fetches", "fetch", columns["fetch"], fetch_values)
+                    ),
+                    "occurred_at": fetch_values[0],
+                    "method": fetch_values[1],
+                    "path": fetch_values[2],
+                    "status_code": fetch_values[3],
+                    "content_type": fetch_values[4],
+                    "body_b64": "e30=",
+                    "error": fetch_values[6],
+                }],
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            for label, first, second in (
+                ("old-then-current", backup(False), backup(True)),
+                ("current-then-old", backup(True), backup(False)),
+            ):
+                restored = Database(f"{directory}/{label}.sqlite3")
+                self.assertEqual(
+                    restored.json_import(first),
+                    {"friends": 1, "status_events": 1, "sync_runs": 1, "raw_fetches": 1},
+                )
+                self.assertEqual(
+                    restored.json_import(second),
+                    {"friends": 0, "status_events": 0, "sync_runs": 0, "raw_fetches": 0},
+                )
+
     def test_database_forks_merge_without_dropping_new_records(self):
         with tempfile.TemporaryDirectory() as directory:
             source_path = f"{directory}/source.sqlite3"
@@ -230,7 +492,9 @@ class ImportExportHistoryTests(unittest.TestCase):
 
             branch_paths = [f"{directory}/left.sqlite3", f"{directory}/right.sqlite3"]
             for branch_path in branch_paths:
-                with sqlite3.connect(source_path) as original, sqlite3.connect(branch_path) as branch:
+                with closing(sqlite3.connect(source_path)) as original, closing(
+                    sqlite3.connect(branch_path)
+                ) as branch:
                     original.backup(branch)
 
             left = Database(branch_paths[0])
@@ -241,17 +505,37 @@ class ImportExportHistoryTests(unittest.TestCase):
             restored = Database(f"{directory}/restored.sqlite3")
             self.assertEqual(restored.json_import(left.json_export())["raw_fetches"], 2)
             self.assertEqual(restored.json_import(right.json_export())["raw_fetches"], 1)
-            with sqlite3.connect(restored.path) as connection:
+            with closing(sqlite3.connect(restored.path)) as connection:
                 bodies = {
                     bytes(row[0])
                     for row in connection.execute("SELECT body FROM raw_fetches").fetchall()
                 }
             self.assertEqual(bodies, {b"seed", b"left", b"right"})
 
+    def test_bridge_checkpoint_detects_a_rewound_or_replaced_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(f"{directory}/monitor.sqlite3")
+            db.upsert_friends(
+                [{"id": "usr_1", "displayName": "Alice", "status": "active"}],
+                source="test",
+            )
+            event = db.events_after()[0]
+
+            current = db.bridge_events(event["id"], event["client_event_id"])
+            rewound = db.bridge_events(event["id"], "event_from_another_database")
+
+            self.assertFalse(current["reset_required"])
+            self.assertEqual(current["items"], [])
+            self.assertTrue(rewound["reset_required"])
+            self.assertEqual(
+                [item["client_event_id"] for item in rewound["items"]],
+                [event["client_event_id"]],
+            )
+
     def test_legacy_database_forked_before_upgrade_keeps_shared_ids(self):
         with tempfile.TemporaryDirectory() as directory:
             seed_path = f"{directory}/legacy.sqlite3"
-            with sqlite3.connect(seed_path) as connection:
+            with closing(sqlite3.connect(seed_path)) as connection:
                 connection.executescript(
                     """
                     CREATE TABLE raw_fetches (
@@ -272,14 +556,16 @@ class ImportExportHistoryTests(unittest.TestCase):
                 )
             branches = [f"{directory}/left.sqlite3", f"{directory}/right.sqlite3"]
             for branch_path in branches:
-                with sqlite3.connect(seed_path) as source, sqlite3.connect(branch_path) as target:
+                with closing(sqlite3.connect(seed_path)) as source, closing(
+                    sqlite3.connect(branch_path)
+                ) as target:
                     source.backup(target)
 
             for branch_path, path, body in (
                 (branches[0], "/left", b"left"),
                 (branches[1], "/right", b"right"),
             ):
-                with sqlite3.connect(branch_path) as connection:
+                with closing(sqlite3.connect(branch_path)) as connection:
                     connection.execute(
                         """INSERT INTO raw_fetches
                         (occurred_at, method, path, status_code, content_type, body, error)
@@ -300,7 +586,7 @@ class ImportExportHistoryTests(unittest.TestCase):
             restored = Database(f"{directory}/restored.sqlite3")
             self.assertEqual(restored.json_import(left_backup)["raw_fetches"], 2)
             self.assertEqual(restored.json_import(right_backup)["raw_fetches"], 1)
-            with sqlite3.connect(restored.path) as connection:
+            with closing(sqlite3.connect(restored.path)) as connection:
                 bodies = [
                     bytes(row[0])
                     for row in connection.execute(
@@ -329,7 +615,7 @@ class ImportExportHistoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "稳定 ID"):
                 restored.json_import(changed)
             self.assertEqual(restored.friends()[0]["display_name"], "Alice")
-            with sqlite3.connect(restored.path) as connection:
+            with closing(sqlite3.connect(restored.path)) as connection:
                 body = bytes(connection.execute("SELECT body FROM raw_fetches").fetchone()[0])
                 count = connection.execute("SELECT COUNT(*) FROM raw_fetches").fetchone()[0]
             self.assertEqual(body, b"original")
@@ -378,7 +664,7 @@ class ImportExportHistoryTests(unittest.TestCase):
             backup = source.json_export()
             restored = Database(f"{directory}/restored.sqlite3")
             self.assertEqual(restored.json_import(backup)["raw_fetches"], 1)
-            with sqlite3.connect(restored.path) as connection:
+            with closing(sqlite3.connect(restored.path)) as connection:
                 restored_body = bytes(
                     connection.execute("SELECT body FROM raw_fetches").fetchone()[0]
                 )
@@ -476,7 +762,7 @@ class ImportExportHistoryTests(unittest.TestCase):
     def test_concurrent_initialization_serializes_legacy_migration(self):
         with tempfile.TemporaryDirectory() as directory:
             path = f"{directory}/legacy.sqlite3"
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.executescript(
                     """
                     CREATE TABLE raw_fetches (

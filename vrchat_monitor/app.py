@@ -308,6 +308,22 @@ class Handler(BaseHTTPRequestHandler):
                 days = 7
             self._json(monitor.db.stats(days))
             return
+        if self.path.startswith("/api/bridge-events"):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                after_id = int(query.get("after_id", ["0"])[0])
+                limit = int(query.get("limit", ["1000"])[0])
+            except ValueError:
+                self._json({"error": "桥接分页参数格式异常"}, 400)
+                return
+            self._json(
+                monitor.db.bridge_events(
+                    after_id,
+                    query.get("checkpoint_event_id", [""])[0],
+                    limit,
+                )
+            )
+            return
         if self.path.startswith("/api/history"):
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
@@ -358,7 +374,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
             return
         if self.path == "/api/export.json":
-            raw = encode_backup_gzip(monitor.db.json_export())
+            try:
+                raw = encode_backup_gzip(monitor.db.json_export())
+            except ValueError as error:
+                self._json({"error": str(error)}, 503)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/gzip")
             self.send_header("Content-Disposition", 'attachment; filename="vrchat-monitor-backup.json.gz"')

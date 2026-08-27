@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.picoworks.vrchat-presence-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON_BIN__</string>
+    <string>__APP_DIR__/scripts/publish_telemetry.py</string>
+    <string>--remote-url</string>
+    <string>__BRIDGE_REMOTE_URL__</string>
+    <string>--token-file</string>
+    <string>__BRIDGE_TOKEN_FILE__</string>
+    <string>--state</string>
+    <string>__BRIDGE_DIR__/bridge-state.json</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__APP_DIR__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__BRIDGE_DIR__/bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__BRIDGE_DIR__/bridge-error.log</string>
+</dict>
+</plist>
