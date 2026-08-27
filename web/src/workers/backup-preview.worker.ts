@@ -1,17 +1,19 @@
-import { summarizeBackup } from '../backup';
+import { normalizeBackupFile } from '../backup-normalizer';
 
-type PreviewRequest = { file: File; maximum: number };
+type PreviewRequest = {
+  file: File;
+  maximum: number;
+  maximumSourceExpanded: number;
+  maximumServerExpanded: number;
+};
 
 self.onmessage = async (event: MessageEvent<PreviewRequest>) => {
-  const { file, maximum } = event.data;
-  if (!(file instanceof File) || !Number.isFinite(maximum) || maximum <= 0 || file.size > maximum) {
-    self.postMessage({ ok: false });
+  const { file, maximum, maximumSourceExpanded, maximumServerExpanded } = event.data;
+  if (!(file instanceof File)) {
+    self.postMessage({ ok: false, reason: 'invalid' });
     return;
   }
-  try {
-    const parsed: unknown = JSON.parse(await file.text());
-    self.postMessage(summarizeBackup(parsed));
-  } catch {
-    self.postMessage({ ok: false });
-  }
+  self.postMessage(
+    await normalizeBackupFile(file, maximum, maximumSourceExpanded, maximumServerExpanded),
+  );
 };

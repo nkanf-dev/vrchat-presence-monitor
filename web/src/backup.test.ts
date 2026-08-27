@@ -6,7 +6,7 @@ describe('backup preview', () => {
   it('summarizes compatible hosted and local backups without retaining their rows', () => {
     const result = summarizeBackup({
       format: 'vrchat-monitor-backup',
-      version: 1,
+      version: 2,
       exported_at: '2026-08-27T12:00:00Z',
       friends: [{ id: 'usr_1' }, { id: 'usr_2' }],
       status_events: [{ id: 1 }],
@@ -44,5 +44,24 @@ describe('backup preview', () => {
     });
 
     expect(result.ok && result.preview.exportedAt).toBe('');
+  });
+
+  it('accepts hosted v2 and rejects an unknown hosted backup version', () => {
+    expect(
+      summarizeBackup({
+        format: 'vrchat-monitor-hosted-backup',
+        version: 2,
+        friends: [],
+        status_events: [],
+      }).ok,
+    ).toBe(true);
+    expect(
+      summarizeBackup({
+        format: 'vrchat-monitor-hosted-backup',
+        version: 3,
+        friends: [],
+        status_events: [],
+      }),
+    ).toEqual({ ok: false });
   });
 });

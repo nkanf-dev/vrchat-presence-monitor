@@ -89,6 +89,18 @@ const importResultSchema = z.object({
   }),
 });
 
+const capabilitiesSchema = z.object({
+  max_import_bytes: z.number().int().positive(),
+  max_import_expanded_bytes: z.number().int().positive(),
+  max_source_expanded_bytes: z.number().int().positive(),
+}).refine(
+  (value) => (
+    value.max_import_expanded_bytes >= value.max_import_bytes
+    && value.max_source_expanded_bytes >= value.max_import_expanded_bytes
+  ),
+  { message: 'expanded import limits are inconsistent' },
+);
+
 export type Identity = z.infer<typeof identitySchema>;
 export type Me = z.infer<typeof meSchema>;
 export type Overview = z.infer<typeof overviewSchema>;
@@ -97,6 +109,7 @@ export type PresenceEvent = z.infer<typeof eventSchema>;
 export type FriendPage = z.infer<typeof friendPageSchema>;
 export type EventPage = z.infer<typeof eventPageSchema>;
 export type ImportResult = z.infer<typeof importResultSchema>;
+export type Capabilities = z.infer<typeof capabilitiesSchema>;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -109,6 +122,14 @@ export class ApiError extends Error {
     this.code = code;
   }
 }
+
+export const AUTH_REQUIRED_EVENT = 'presence-monitor:auth-required';
+
+const notifyAuthenticationRequired = (path: string, status: number) => {
+  if (status === 401 && path !== '/v1/me' && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+  }
+};
 
 const LEGACY_KEYS = ['presence-monitor.session', 'vrchat-monitor.viewer-token'] as const;
 
@@ -157,6 +178,7 @@ async function rawRequest(path: string, options: RequestInit = {}): Promise<unkn
   }
   const payload = await parseResponse(response);
   if (!response.ok) {
+    notifyAuthenticationRequired(path, response.status);
     const message =
       typeof payload === 'object' && payload && 'error' in payload && typeof payload.error === 'string'
         ? payload.error
@@ -171,6 +193,61 @@ async function request<T>(path: string, schema: z.ZodType<T>, options: RequestIn
   const parsed = schema.safeParse(payload);
   if (!parsed.success) throw new ApiError('服务器返回了无法识别的数据', 0, 'invalid-data');
   return parsed.data;
+}
+
+const backupFilename = (response: Response) => {
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const quoted = disposition.match(/filename="([^"]+)"/i)?.[1];
+  const plain = disposition.match(/filename=([^;]+)/i)?.[1]?.trim();
+  let candidate = utf8 ?? quoted ?? plain ?? '';
+  if (utf8) {
+    try {
+      candidate = decodeURIComponent(utf8);
+    } catch {
+      candidate = '';
+    }
+  }
+  candidate = candidate.split(/[\\/]/).at(-1) ?? '';
+  candidate = [...candidate]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code >= 0x20 && code !== 0x7f;
+    })
+    .join('');
+  if (/\.json(?:\.gz)?$/i.test(candidate)) return candidate;
+  return response.headers.get('Content-Type')?.includes('application/gzip')
+    ? 'presence-monitor-backup.json.gz'
+    : 'presence-monitor-backup.json';
+};
+
+export async function downloadBackup(): Promise<{ blob: Blob; filename: string }> {
+  let response: Response;
+  try {
+    response = await fetch('/v1/export.json', {
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json, application/gzip' },
+    });
+  } catch {
+    throw new ApiError('暂时无法连接服务', 0, 'network');
+  }
+  if (!response.ok) {
+    notifyAuthenticationRequired('/v1/export.json', response.status);
+    const payload = await parseResponse(response);
+    const message =
+      typeof payload === 'object' && payload && 'error' in payload && typeof payload.error === 'string'
+        ? payload.error
+        : `备份导出失败（${response.status}）`;
+    throw new ApiError(message, response.status);
+  }
+  let blob: Blob;
+  try {
+    blob = await response.blob();
+  } catch {
+    throw new ApiError('备份下载中断，请重试', 0, 'network');
+  }
+  if (blob.size === 0) throw new ApiError('服务器返回了空备份', 0, 'invalid-data');
+  return { blob, filename: backupFilename(response) };
 }
 
 export async function getMe(): Promise<Me> {
@@ -201,6 +278,8 @@ export const logout = () =>
 
 export const getOverview = () => request('/v1/overview', overviewSchema);
 
+export const getCapabilities = () => request('/v1/capabilities', capabilitiesSchema);
+
 export const getFriends = (options: {
   query?: string;
   status?: string;
@@ -227,5 +306,9 @@ export const importBackupFile = (file: File) =>
   request('/v1/import.json', importResultSchema, {
     method: 'POST',
     body: file,
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': /\.gz$/i.test(file.name) || file.type === 'application/gzip'
+        ? 'application/gzip'
+        : 'application/json',
+    },
   });

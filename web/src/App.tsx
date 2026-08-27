@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 
 import {
   ApiError,
+  AUTH_REQUIRED_EVENT,
   type Friend,
   getEvents,
   getFriends,
@@ -80,6 +81,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       queryClient.invalidateQueries({ queryKey: ['overview'] }),
       queryClient.invalidateQueries({ queryKey: ['friends'] }),
       queryClient.invalidateQueries({ queryKey: ['events'] }),
+      queryClient.invalidateQueries({ queryKey: ['capabilities'] }),
     ]);
   };
 
@@ -164,6 +166,17 @@ export function App() {
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ['me'], queryFn: getMe, retry: false, staleTime: 5 * 60_000 });
   const loginMutation = useMutation({ mutationFn: login });
+
+  useEffect(() => {
+    const requireAuthentication = () => {
+      queryClient.removeQueries({
+        predicate: (query) => query.queryKey[0] !== 'me',
+      });
+      void queryClient.invalidateQueries({ queryKey: ['me'], exact: true });
+    };
+    window.addEventListener(AUTH_REQUIRED_EVENT, requireAuthentication);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, requireAuthentication);
+  }, [queryClient]);
 
   if (me.isPending) return <LoadingScreen />;
 

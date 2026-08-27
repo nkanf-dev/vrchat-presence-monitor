@@ -15,7 +15,11 @@ const formats = new Set(['vrchat-monitor-backup', 'vrchat-monitor-hosted-backup'
 export function summarizeBackup(value: unknown): BackupPreviewResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
   const payload = value as Record<string, unknown>;
-  if (typeof payload.format !== 'string' || !formats.has(payload.format) || payload.version !== 1) {
+  const supportedVersion =
+    (payload.format === 'vrchat-monitor-hosted-backup' &&
+      (payload.version === 1 || payload.version === 2)) ||
+    (payload.format === 'vrchat-monitor-backup' && (payload.version === 1 || payload.version === 2));
+  if (typeof payload.format !== 'string' || !formats.has(payload.format) || !supportedVersion) {
     return { ok: false };
   }
   if (!Array.isArray(payload.friends) || !Array.isArray(payload.status_events)) return { ok: false };

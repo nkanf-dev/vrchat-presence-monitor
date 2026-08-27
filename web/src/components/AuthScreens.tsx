@@ -24,7 +24,7 @@ export function OfflineScreen({ message, onRetry }: { message: string; onRetry: 
         <Brand />
         <p className="kicker">连接中断</p>
         <h1 id="offline-title">暂时连不上服务</h1>
-        <p>{message}。这台设备的登录仍然保留，服务恢复后可以直接重试。</p>
+        <p>{message}。服务恢复后可以重新连接；如果此前已登录，仍有效的会话会继续使用。</p>
         <button className="button button-primary button-wide" onClick={onRetry} autoFocus>
           <RefreshCw size={18} aria-hidden="true" />
           重新连接
@@ -70,9 +70,9 @@ export function LoginScreen({
       <section className="auth-card" aria-labelledby="login-title">
         <Brand />
         <div className="auth-intro">
-          <p className="kicker">欢迎回来</p>
+          <p className="kicker">安全访问</p>
           <h1 id="login-title">打开你的监控面板</h1>
-          <p>输入服务管理员发给你的访问码。这台设备会保持登录，之后打开即可查看。</p>
+          <p>输入服务管理员发给你的访问码。如果此前已登录，这台设备会继续使用仍然有效的会话。</p>
         </div>
         <form className="login-form" onSubmit={submit}>
           <label htmlFor="access-code">访问码</label>

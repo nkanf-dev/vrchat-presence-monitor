@@ -1395,11 +1395,21 @@ tbody tr:last-child td {
 }
 
 .operation-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   margin: 0 0 16px;
   padding: 12px 14px;
   border: 1px solid;
   border-radius: 10px;
   font-size: 0.78rem;
+}
+
+.operation-message .button {
+  min-height: 34px;
+  padding: 7px 11px;
 }
 
 .operation-message.success {

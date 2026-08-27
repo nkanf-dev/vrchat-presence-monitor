@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { getMe, login } from './api';
+import { AUTH_REQUIRED_EVENT, downloadBackup, getMe, getOverview, login } from './api';
 
 const jsonResponse = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
@@ -63,5 +63,49 @@ describe('hosted API client', () => {
     await expect(getMe()).rejects.toEqual(
       expect.objectContaining({ code: 'network', message: '暂时无法连接服务' }),
     );
+  });
+
+  it('downloads the server-selected backup format only after a successful response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"format":"vrchat-monitor-hosted-backup"}', {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': 'attachment; filename="tenant-backup.json.gz"',
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await downloadBackup();
+
+    expect(result.filename).toBe('tenant-backup.json.gz');
+    expect(result.blob.size).toBeGreaterThan(0);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/v1/export.json',
+      expect.objectContaining({ credentials: 'same-origin' }),
+    );
+  });
+
+  it('reports an export error instead of treating an error page as a download', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(503, { error: '备份容量暂时不可用' })),
+    );
+
+    await expect(downloadBackup()).rejects.toEqual(
+      expect.objectContaining({ status: 503, message: '备份容量暂时不可用' }),
+    );
+  });
+
+  it('announces an expired session for every authenticated endpoint', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized' })));
+    const listener = vi.fn();
+    window.addEventListener(AUTH_REQUIRED_EVENT, listener);
+
+    await expect(getOverview()).rejects.toEqual(expect.objectContaining({ status: 401 }));
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    window.removeEventListener(AUTH_REQUIRED_EVENT, listener);
   });
 });
