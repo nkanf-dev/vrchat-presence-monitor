@@ -33,7 +33,9 @@ To delete Local data, stop the service, remove `~/.picoworks-vrchat-monitor/`, a
 
 - Never publish the Local monitor or port 8842 through a tunnel, LAN bind, reverse proxy, or public firewall rule. Use Hosted for remote access.
 - Put Hosted behind HTTPS and keep port 8080 bound to loopback.
-- Store `.secrets/` with mode `0700` and each secret with mode `0600`.
+- Store `.secrets/` with mode `0700`. For standalone Compose, give each secret
+  file its documented fixed container UID, the operator's GID and mode `0440`;
+  keep device-side bridge tokens that are read only by the operator at `0600`.
 - Rotate bootstrap, access, collector, tunnel, and R2 backup credentials after suspected disclosure.
 - Back up and restore-test the database; do not copy a live SQLite file without the backup API.
 - Keep the host, Docker engine, base images, Python and npm dependencies patched.

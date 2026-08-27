@@ -16,7 +16,7 @@ Presence Monitor 会在本机记录 VRChat 好友与自己的状态、位置和�
 - 每日好友在线时间轴，以及按独立日期范围计算的“好友 × 时段”热力图
 - 在线时间与游玩世界叠加时间轴、世界筛选、缩略图和公开世界资料
 - 玩家头像、简介、公开链接、累计记录时长与最近变化
-- append-only 原始 API 响应、本地 JSON/CSV 导出，以及 merge-only 数据导入
+- append-only 原始 API 响应、本地 v2 JSON.gz/CSV 导出，以及冲突即回滚的 merge-only 数据导入
 - 适配手机的导航、表格、弹窗、触控滚动和可恢复页面锚点
 
 ## 两种运行方式
@@ -88,7 +88,7 @@ curl --fail --silent --show-error \
 
 ### 连接现有 Local monitor
 
-把 collector token 存到采集设备上的 `0600` 文件，然后执行一次同步：
+把 collector token 存到采集设备上的 `0600` 文件，然后先执行一次同步确认连接：
 
 ```bash
 install -d -m 700 ~/.presence-monitor
@@ -99,7 +99,17 @@ python3 scripts/publish_telemetry.py \
   --token-file ~/.presence-monitor/collector-token
 ```
 
-bridge 从本机的 `/api/state` 与分页历史接口读取标准化数据，按稳定事件 ID 断点续传；遇到 429/5xx 会按 `Retry-After` 或指数退避重试。它不会读取、上传或持有 VRChat Cookie。
+bridge 从本机的 `/api/state` 与 ID 顺序历史接口读取标准化数据，以“数据库行号 + 稳定事件 ID”双重断点续传；恢复旧 SQLite 快照后会安全重放，而不会永久跳过复用的行号。旧版 Local monitor 会自动回退到分页历史接口。遇到 429/5xx 时按 `Retry-After` 或指数退避重试。bridge 不会读取、上传或持有 VRChat Cookie。
+
+上面的命令是一次性检查。macOS 日常使用应交给 `launchd`，每分钟增量同步并在登录后自动恢复；token 仍只保存在原来的 `0600` 文件中：
+
+```bash
+PRESENCE_REMOTE_URL=https://presence.example.com \
+PRESENCE_COLLECTOR_TOKEN_FILE="$HOME/.presence-monitor/collector-token" \
+  ./install-vrchat-monitor.command
+```
+
+安装器会同时守护 Local monitor 和 bridge。运行日志、断点与错误分别保存在 `~/.presence-monitor/bridge.log`、`bridge-state.json` 和 `bridge-error.log`；不会把 token 写入 plist 或日志。电脑睡眠时不会伪造采集，唤醒后会从稳定事件 ID 继续补传。
 
 ### Cloudflare Tunnel
 
@@ -117,13 +127,19 @@ docker compose --profile tunnel up -d cloudflared
 
 ### 备份
 
+Local 下载使用 v2 `JSON.gz`：每条状态、同步与 raw 响应都有独立稳定 ID，数据库副本可以安全合并；相同 ID 的内容若不一致，整次导入会回滚。新版仍可读取 v1，旧版会拒绝 v2，而不会按旧去重规则静默吞记录。
+
+Hosted 在浏览器 Worker 中流式检查备份，并在 JSON 解析器看到大字符串之前剥离 raw 响应；上传内容只有玩家与状态历史。服务器再次流式解析，先限制嵌套深度、对象数量与物化内存，再进入原子导入事务。页面从认证后的 `/v1/capabilities` 读取实例真实限制，不会自行猜测容量。默认请求上限 `MAX_IMPORT_BYTES` 为 32 MiB，最大可配置为 64 MiB；服务器 gzip 解压上限 `MAX_IMPORT_EXPANDED_BYTES` 固定不超过 64 MiB，以适配默认的 512 MiB 容器内存预算。浏览器本地源文件解压上限 `MAX_SOURCE_EXPANDED_BYTES` 默认 256 MiB、最高 512 MiB。这样可以在不把 150+ MiB raw 响应送进服务器内存的前提下迁移完整的 Local 备份。
+
+新写入会在可移植备份超过容量前整批回滚。升级前已经超限的租户仍可启动和读取，且不会因为无增长的重放再次失败；网页会优先导出可回导的 JSON，必要时改用确定性 JSON.gz。若压缩后仍无法满足同实例的请求/解压限制，接口会明确返回 503，并要求使用部署者持有的 SQLite/R2 恢复制品，而不是生成一份看似成功、实际无法恢复的下载。
+
 网页中的“数据”页提供按租户 JSON 导入/导出。`backup-scheduler` 会在启动时及每小时生成一次经过恢复校验的 SQLite gzip 制品，本机保留最近 48 份；也可以随时手工生成：
 
 ```bash
 docker compose --profile tools run --rm backup
 ```
 
-每份制品包含 manifest、压缩前后两组 SHA-256，并通过 SQLite `integrity_check`；不会直接复制正在写入的 WAL 文件。同机快照仍不足以抵抗服务器丢失。仓库提供一个 append-only R2 gateway，把 8 MiB 分片写入私有 Cloudflare R2：
+每份制品包含 manifest、压缩前后两组 SHA-256，并通过 SQLite `integrity_check`；不会直接复制正在写入的 WAL 文件。同机快照仍不足以抵抗服务器丢失。仓库提供一个 append-only R2 gateway，把最大 64 GiB 的制品按 8 MiB 分片写入私有 Cloudflare R2：
 
 ```bash
 cd infra/r2-backup-worker
@@ -131,6 +147,7 @@ npm ci --ignore-scripts --no-audit --no-fund
 npx wrangler login
 npx wrangler r2 bucket create presence-monitor-backups
 npx wrangler r2 bucket lifecycle set presence-monitor-backups --file lifecycle.json
+npx wrangler r2 bucket lock set presence-monitor-backups --file bucket-lock.json
 openssl rand -hex 32 > ../../.secrets/backup_token
 npx wrangler secret put BACKUP_TOKEN < ../../.secrets/backup_token
 npx wrangler deploy
@@ -143,7 +160,9 @@ BACKUP_REMOTE_URL=https://你的-worker地址 \
   docker compose --profile offsite up -d backup-scheduler offsite-backup
 ```
 
-R2 bucket 不开放公网读取；Worker 只有带备份 token 的上传、精确读取和 latest 查询，没有删除接口。远端按小时/每日/每月保留 8/93/400 天。`offsite-backup` 每天会真正下载一个对象到临时目录，重新核对双重摘要、schema 和 `integrity_check`；只有 `HEAD` 成功不算恢复演练。恢复命令默认只验证，不会覆盖生产数据库：
+默认部署把异地对象命名空间固定为 `production`，与仓库中的生命周期和 Bucket Lock 规则保持一致。若自行修改实例名，必须先为新前缀配置同等保留与锁定策略，不能只改容器参数。
+
+R2 bucket 不开放公网读取；Worker 只有带备份 token 的上传、精确读取和 latest 查询，没有删除接口。生命周期与 Bucket Lock 共同保证小时/每日/每月制品至少保留 8/93/400 天，保留期内连误操作也不能覆盖或删除对象。`offsite-backup` 每天会真正下载一个对象到临时目录，重新核对双重摘要、schema 和 `integrity_check`；只有 `HEAD` 成功不算恢复演练。恢复命令默认只验证，不会覆盖生产数据库：
 
 ```bash
 python3 scripts/restore_hosted.py \
@@ -160,7 +179,7 @@ R2 提高的是数据耐久性，不会在 Linux 主机离线时让 API 自动�
 - 登录有固定窗口限速，429 带 `Retry-After`；敏感 mutation 校验 same-origin。
 - 容器以非 root 用户运行，根文件系统只读，删除全部 Linux capabilities，并限制进程数。
 - Cloudflare Tunnel 只需出站连接；应用端口仅绑定 `127.0.0.1`。
-- Local JSON 备份包含好友资料、历史与 raw API 响应，但不包含密码或会话 Cookie。
+- Local JSON.gz 备份包含好友资料、历史与 raw API 响应，但不包含密码或会话 Cookie；Hosted 导入会在浏览器内剥离 raw 响应后再上传规范化数据。
 
 完整威胁模型、数据删除和报告方式见 [SECURITY.md](SECURITY.md)。
 
