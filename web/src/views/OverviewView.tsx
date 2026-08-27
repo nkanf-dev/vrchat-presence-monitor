@@ -6,12 +6,12 @@ import {
   formatDateTime,
   formatNumber,
   friendName,
-  locationLabel,
   platformLabel,
   statusLabel,
   statusTone,
 } from '../format';
 import { Avatar } from '../components/Avatar';
+import { LocationText } from '../components/LocationText';
 
 function EmptyPanel({ title, copy }: { title: string; copy: string }) {
   return (
@@ -57,7 +57,7 @@ function PersonButton({ friend, onOpen }: { friend: Friend; onOpen: (friend: Fri
           {Boolean(friend.is_self) && <em>自己</em>}
         </strong>
         <span>
-          {locationLabel(friend.location, friend.status)} · {platformLabel(friend.platform)}
+          <LocationText location={friend.location} status={friend.status} /> · {platformLabel(friend.platform)}
         </span>
       </span>
       <span className={`status-badge tone-${statusTone(friend.status)}`}>{statusLabel(friend.status)}</span>
@@ -146,8 +146,8 @@ export function OverviewView({
         <section className="panel" aria-labelledby="online-title">
           <header className="panel-heading">
             <div>
-              <p className="kicker">Latest presence</p>
-              <h2 id="online-title">最近状态</h2>
+              <p className="kicker">Online now</p>
+              <h2 id="online-title">当前在线玩家</h2>
             </div>
             <button className="text-action" onClick={onNavigatePeople}>
               查看全部 <ArrowRight size={16} aria-hidden="true" />
@@ -166,7 +166,7 @@ export function OverviewView({
                 <PersonButton key={friend.id} friend={friend} onOpen={onOpenFriend} />
               ))
             ) : (
-              <EmptyPanel title="还没有玩家快照" copy="云端完成首次采集后，会在这里列出最近的好友状态。" />
+              <EmptyPanel title="当前没有在线玩家" copy="有人上线后会立即出现在这里。" />
             )}
           </div>}
         </section>
@@ -198,7 +198,7 @@ export function OverviewView({
                     <span>
                       {statusLabel(event.old_status)} → {statusLabel(event.new_status)}
                     </span>
-                    <small>{locationLabel(event.location, event.new_status)}</small>
+                    <small><LocationText location={event.location} status={event.new_status} /></small>
                   </div>
                   <time dateTime={event.occurred_at}>{formatDateTime(event.occurred_at)}</time>
                 </li>

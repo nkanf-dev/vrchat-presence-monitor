@@ -104,7 +104,7 @@ function VrchatLoginPanel({
           <p>
             {reconnect
               ? '你的面板与历史数据保持不变，重新验证后云端会继续采集。'
-              : '登录后会恢复你的已有空间；关闭或刷新页面不会中断云端采集。'}
+              : '使用你的 VRChat 账号登录。'}
           </p>
         </div>
         <form className="login-form" onSubmit={submit}>
@@ -173,7 +173,7 @@ function VrchatLoginPanel({
             {errorMessage}
           </p>
           <button className="button button-primary button-wide" type="submit" disabled={pending || !canSubmit}>
-            {pending ? '正在连接…' : requiresTwoFactor ? '验证并继续' : reconnect ? '重新连接' : '登录并恢复空间'}
+            {pending ? '正在登录…' : requiresTwoFactor ? '验证并继续' : reconnect ? '重新连接' : '登录'}
             {!pending && <ArrowRight size={18} aria-hidden="true" />}
           </button>
         </form>

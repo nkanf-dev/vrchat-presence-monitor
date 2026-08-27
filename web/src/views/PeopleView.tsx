@@ -7,12 +7,12 @@ import { ApiError, type Friend, getAnalyticsStats, getFriends } from '../api';
 import {
   formatDateTime,
   friendName,
-  locationLabel,
   platformLabel,
   statusLabel,
   statusTone,
 } from '../format';
 import { Avatar } from '../components/Avatar';
+import { LocationText } from '../components/LocationText';
 import { Pagination } from '../components/Pagination';
 import { useHashParameters } from '../navigation';
 
@@ -180,7 +180,7 @@ export function PeopleView({ onOpenFriend }: { onOpenFriend: (friend: Friend) =>
                           {statusLabel(friend.status)}
                         </span>
                       </td>
-                      <td data-label="位置">{locationLabel(friend.location, friend.status)}</td>
+                      <td data-label="位置"><LocationText location={friend.location} status={friend.status} /></td>
                       <td data-label="设备">{platformLabel(friend.platform)}</td>
                       <td data-label="近 30 天时长" className="playtime-cell">
                         {stats.isPending ? '读取中…' : formatSecondsCompact(playtime.get(friend.id) ?? 0)}

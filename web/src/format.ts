@@ -47,13 +47,14 @@ export const platformLabel = (platform: string) => {
 };
 
 export const locationLabel = (location: string, status: string) => {
+  const raw = location.trim();
   const value = location.trim().toLowerCase();
   if (status.toLowerCase() === 'offline') return '离线';
   if (!value || value === 'offline') return '位置不可见';
   if (value === 'private') return '私人位置';
   if (value === 'traveling') return '正在切换世界';
-  if (value.startsWith('wrld_')) return '可见世界';
-  return '位置可见';
+  if (value === 'online') return '在线（位置隐藏）';
+  return raw;
 };
 
 export const friendName = (friend: Friend) =>

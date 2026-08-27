@@ -5,6 +5,11 @@ export const TRAVELING_WORLD_ID = '__traveling__';
 export const OFFLINE_WORLD_ID = '__offline__';
 export const HIDDEN_WORLD_ID = '__location_hidden__';
 
+const WORLD_LOCATION_PATTERN = /wrld_[0-9a-f-]{36}/i;
+
+export const worldIdFromLocation = (location: string) =>
+  location.match(WORLD_LOCATION_PATTERN)?.[0] ?? '';
+
 const SPECIAL_WORLDS: Record<string, WorldInfo> = {
   [PRIVATE_WORLD_ID]: {
     id: PRIVATE_WORLD_ID,

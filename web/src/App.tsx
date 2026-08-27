@@ -61,7 +61,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
   });
   const peopleQuery = useQuery({
     queryKey: ['friends', 'overview'],
-    queryFn: () => getFriends({ limit: 8, offset: 0 }),
+    queryFn: () => getFriends({ status: 'online', limit: 50, offset: 0 }),
     refetchInterval: 60_000,
     enabled: view === 'overview',
   });

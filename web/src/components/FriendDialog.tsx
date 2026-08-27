@@ -4,13 +4,13 @@ import { useEffect, useRef } from 'react';
 import type { Friend } from '../api';
 import {
   friendName,
-  locationLabel,
   parseBioLinks,
   platformLabel,
   statusLabel,
   statusTone,
 } from '../format';
 import { Avatar } from './Avatar';
+import { LocationText } from './LocationText';
 
 export function FriendDialog({ friend, onClose }: { friend: Friend | null; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -53,7 +53,7 @@ export function FriendDialog({ friend, onClose }: { friend: Friend | null; onClo
             <dt>
               <MapPin size={16} aria-hidden="true" /> 位置
             </dt>
-            <dd>{locationLabel(friend.location, friend.status)}</dd>
+            <dd><LocationText location={friend.location} status={friend.status} /></dd>
           </div>
           <div>
             <dt>

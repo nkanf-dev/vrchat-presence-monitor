@@ -6,12 +6,12 @@ import { ApiError, getEvents } from '../api';
 import {
   eventName,
   formatDateTime,
-  locationLabel,
   platformLabel,
   statusLabel,
   statusTone,
 } from '../format';
 import { Pagination } from '../components/Pagination';
+import { LocationText } from '../components/LocationText';
 import { useHashParameters } from '../navigation';
 
 const PAGE_SIZE = 30;
@@ -140,7 +140,7 @@ export function HistoryView() {
                         </span>
                       </span>
                     </td>
-                    <td data-label="位置">{locationLabel(event.location, event.new_status)}</td>
+                    <td data-label="位置"><LocationText location={event.location} status={event.new_status} /></td>
                     <td data-label="设备">{platformLabel(event.platform)}</td>
                     <td data-label="来源">{event.source === 'websocket' ? '实时事件' : 'API 校准'}</td>
                     <td data-label="发生时间">
