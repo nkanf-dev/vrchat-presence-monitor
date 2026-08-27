@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.vrchat.cloud https://*.vrcdn.cloud; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <title>VRChat 好友状态监控</title>
+  <link rel="stylesheet" href="/styles.css?v=20260819-12">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">✦</span><span>Presence<br><em>Monitor</em></span></div>
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav>
+        <button class="nav-item active" data-view="overview"><span>◈</span> 总览</button>
+        <button class="nav-item" data-view="daily"><span>▦</span> 每日在线</button>
+        <button class="nav-item" data-view="world"><span>◉</span> 在线 × 世界</button>
+        <button class="nav-item" data-view="friends"><span>◌</span> 好友列表</button>
+        <button class="nav-item" data-view="history"><span>◷</span> 状态历史</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="connection-card"><span class="pulse-dot"></span><div><strong id="sideStatus">未连接</strong><small id="sideMessage">等待登录</small></div></div>
+        <div class="top-export-actions"><button class="ghost-button" id="exportButton">↓ 导出 CSV</button><button class="ghost-button" id="exportJsonButton">↓ 备份 JSON.gz</button></div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div><div class="eyebrow">LOCAL WORKSPACE / VRCHAT</div><h1 id="pageTitle">状态总览</h1></div>
+        <div class="top-actions"><span class="last-updated" id="lastUpdated">尚未同步</span><button class="button primary" id="loginButton">连接 VRChat <span>↗</span></button><button class="avatar-button" id="avatarButton">?</button></div>
+      </header>
+
+      <section id="loginView" class="login-view hidden">
+        <div class="login-glow"></div>
+        <div class="login-panel">
+          <div class="login-icon">✦</div>
+          <div class="eyebrow">PRIVATE / LOCAL ONLY</div>
+          <h2>连接你的 VRChat</h2>
+          <p>会话凭据只保存在本机 Keychain，不会上传到任何第三方服务器。</p>
+          <form id="loginForm">
+            <label>VRChat 用户名或邮箱<input id="username" autocomplete="username" required></label>
+            <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+            <button class="button primary full" type="submit">登录并同步好友 <span>→</span></button>
+          </form>
+          <form id="twoFactorForm" class="hidden">
+            <label>Authenticator 验证码<input id="twoFactorCode" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required></label>
+            <button class="button primary full" type="submit">验证并继续 <span>→</span></button>
+          </form>
+          <div class="form-error" id="loginError"></div>
+          <div class="login-note">支持 TOTP 二次验证 · 首次同步可能需要几秒</div>
+        </div>
+      </section>
+
+      <section id="dashboardView" class="dashboard-view">
+        <div class="status-banner" id="statusBanner"><span class="banner-dot"></span><div><strong id="bannerTitle">监控服务准备中</strong><span id="bannerText">登录后会自动同步全部好友</span></div><button class="icon-button" id="syncButton" title="立即同步">↻</button></div>
+        <div class="metric-grid">
+          <article class="metric-card accent"><div class="metric-label">当前在线</div><div class="metric-value" id="onlineCount">—</div><div class="metric-foot"><span class="green-dot"></span><span id="onlineMeta">等待数据</span></div><div class="spark" id="onlineSpark"></div></article>
+          <article class="metric-card"><div class="metric-label">好友总数</div><div class="metric-value" id="friendCount">—</div><div class="metric-foot"><span class="muted-dot"></span><span id="friendMeta">完整好友列表</span></div></article>
+          <article class="metric-card"><div class="metric-label">近 7 天状态变化</div><div class="metric-value" id="changeCount">—</div><div class="metric-foot"><span class="orange-dot"></span><span>跨平台记录</span></div></article>
+          <article class="metric-card"><div class="metric-label">监控状态</div><div class="metric-value metric-status" id="monitorStatus">未连接</div><div class="metric-foot"><span class="green-dot"></span><span id="monitorMeta">本机服务</span></div></article>
+        </div>
+
+        <div class="content-grid">
+          <article class="panel presence-panel"><div class="panel-head"><div><div class="eyebrow">LIVE PRESENCE</div><h3>好友实时状态</h3></div><button class="filter-button" data-view="friends">查看全部 <span>→</span></button></div><div class="presence-list" id="presenceList"></div></article>
+          <article class="panel event-panel"><div class="panel-head"><div><div class="eyebrow">ACTIVITY LOG</div><h3>最近变化</h3></div><span class="live-label"><span class="pulse-dot"></span>LIVE</span></div><div class="event-list" id="eventList"></div></article>
+        </div>
+
+        <div class="lower-grid"><article class="panel chart-panel"><div class="panel-head"><div><div class="eyebrow">ACTIVITY / 7 DAYS</div><h3>状态变化趋势</h3></div><div class="chart-legend"><span><i class="legend-online"></i>在线变化</span><span><i class="legend-all"></i>全部变化</span></div></div><canvas id="trendChart" height="190"></canvas></article><article class="panel ranking-panel"><div class="panel-head"><div><div class="eyebrow">TIME SPENT</div><h3>在线时长排行</h3></div></div><div id="rankingList"></div></article></div>
+      </section>
+
+      <section id="friendsView" class="sub-view hidden"><div class="section-intro"><div><div class="eyebrow">ALL FRIENDS</div><h2>好友列表</h2><p>状态由实时事件和 API 校准共同维护，游玩时间按近 30 天统计。</p></div><div class="search-box">⌕ <input id="friendSearch" placeholder="搜索好友…"></div></div><div class="friends-table" id="friendsTable"></div></section>
+      <section id="historyView" class="sub-view hidden"><div class="section-intro"><div><div class="eyebrow">HISTORY</div><h2>状态历史</h2><p>所有状态变化均保存在本机 SQLite，可搜索和分页查看。</p></div><div class="history-actions"><button class="button secondary" id="historyImportButton">导入备份</button><input id="historyImportFile" type="file" accept="application/json,application/gzip,.json,.json.gz,.gz" hidden><button class="button secondary" id="historyExport">导出 CSV</button><button class="button secondary" id="historyExportJson">备份 JSON.gz</button></div></div><div class="history-toolbar"><div class="search-box">⌕ <input id="historySearch" placeholder="搜索玩家、状态、位置、来源…"></div><div class="history-pagination"><button class="button secondary" id="historyPrev">←</button><span id="historyPageInfo">—</span><button class="button secondary" id="historyNext">→</button></div></div><div class="panel history-panel" id="historyTable"></div></section>
+      <section id="dailyView" class="sub-view hidden">
+        <div class="section-intro"><div><div class="eyebrow">DAILY PRESENCE</div><h2>每日在线情况</h2><p>上图是选定日期的实际在线区间，下图是可独立选择日期范围的好友热力图。</p></div><div class="daily-controls"><button class="button secondary" id="dailyPrev" title="前一天">←</button><input id="dailyDate" type="date" aria-label="选择日期"><button class="button secondary" id="dailyNext" title="后一天">→</button><button class="button secondary" id="dailyLatest" type="button">最新</button></div><select id="dailyRange" class="hidden" aria-hidden="true"><option value="30">30</option></select></div>
+        <article class="panel daily-panel"><div class="panel-head"><div><div class="eyebrow">SELECTED DAY</div><h3 id="dailyTimelineTitle">当天在线时间带</h3></div><span class="daily-note" id="dailyTimezone"></span></div><canvas id="dailyTimelineCanvas" class="daily-canvas" aria-label="每位好友当天在线时间带"></canvas></article>
+        <article class="panel daily-panel"><div class="panel-head heatmap-panel-head"><div><div class="eyebrow">AVERAGE BY FRIEND / HOUR</div><h3>好友平均每日热力图</h3></div><div class="heatmap-tools"><div class="heatmap-controls"><label>从 <input id="heatmapFrom" type="date" aria-label="热力图起始日期"></label><span>至</span><label><input id="heatmapTo" type="date" aria-label="热力图结束日期"></label><button class="button secondary" id="heatmapReset" type="button">近 30 天</button></div><span class="daily-note" id="heatmapNote">颜色越亮，在线比例越高</span></div></div><canvas id="dailyHeatmapCanvas" class="daily-canvas heatmap-canvas" aria-label="每位好友每小时平均在线比例热力图"></canvas></article>
+      </section>
+      <section id="worldView" class="sub-view hidden">
+        <div class="section-intro"><div><div class="eyebrow">PRESENCE / WORLDS</div><h2>在线 × 游玩世界</h2><p>选择一个人查看清晰时间轴，下方同时对比所有好友与自己。</p></div><div class="daily-controls"><button class="button secondary" id="worldPrev" title="前一天">←</button><input id="worldDate" type="date" aria-label="选择分析日期"><button class="button secondary" id="worldNext" title="后一天">→</button><button class="button secondary" id="worldLatest" type="button">最新</button></div></div>
+        <article class="panel world-detail-panel"><div class="panel-head"><div><div class="eyebrow">SELECTED PERSON</div><h3 id="worldDetailTitle">在线与世界时间轴</h3></div><div class="world-person-control"><label for="worldFriendSelect">查看</label><select id="worldFriendSelect"></select></div></div><canvas id="worldDetailCanvas" class="daily-canvas world-canvas" aria-label="选中对象的在线与游玩世界时间轴"></canvas><div class="world-legend" id="worldLegend"></div></article>
+        <article class="panel world-overview-panel"><div class="panel-head"><div><div class="eyebrow">ALL TRACKED PEOPLE</div><h3>所有好友与自己的世界时间带</h3></div><div class="world-filter"><label for="worldFilterSelect">筛选世界</label><select id="worldFilterSelect"><option value="">全部世界</option></select><span class="daily-note" id="worldOverviewNote"></span></div></div><canvas id="worldOverviewCanvas" class="daily-canvas world-canvas" aria-label="所有好友与自己的在线和世界时间带"></canvas><div class="world-legend" id="worldOverviewLegend"></div></article>
+      </section>
+    </main>
+  </div>
+  <div class="modal-backdrop hidden" id="profileModal">
+    <div class="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+      <button class="modal-close" id="modalClose" aria-label="关闭">×</button>
+      <div id="profileCard"></div>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="alert" aria-live="assertive" aria-atomic="true"></div>
+  <script src="/app.js?v=20260826-1"></script>
+</body>
+</html>

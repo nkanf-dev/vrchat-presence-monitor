@@ -1,0 +1,13 @@
+{
+  "name": "presence-monitor-r2-backup",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node --test test/*.test.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.127.0"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "rules": [
+    {
+      "id": "lock-production-hourly",
+      "enabled": true,
+      "prefix": "backups/production/hourly/",
+      "condition": {
+        "type": "Age",
+        "maxAgeSeconds": 691200
+      }
+    },
+    {
+      "id": "lock-production-daily",
+      "enabled": true,
+      "prefix": "backups/production/daily/",
+      "condition": {
+        "type": "Age",
+        "maxAgeSeconds": 8035200
+      }
+    },
+    {
+      "id": "lock-production-monthly",
+      "enabled": true,
+      "prefix": "backups/production/monthly/",
+      "condition": {
+        "type": "Age",
+        "maxAgeSeconds": 34560000
+      }
+    }
+  ]
+}

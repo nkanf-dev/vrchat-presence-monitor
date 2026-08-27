@@ -1,0 +1,2 @@
+-r requirements.in
+httpx==0.28.1

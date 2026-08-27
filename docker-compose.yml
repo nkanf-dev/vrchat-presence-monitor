@@ -1,0 +1,192 @@
+name: presence-monitor
+
+services:
+  vrchat-monitor:
+    build: .
+    image: presence-monitor:local
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      DATA_DIR: /data
+      BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap_token
+      HOSTED_VRCHAT_LOGIN: "1"
+      VRCHAT_SESSION_KEY_FILE: /run/secrets/vrchat_session_key
+      HOSTED_COLLECTOR_POLL_SECONDS: "${HOSTED_COLLECTOR_POLL_SECONDS:-180}"
+      HOSTED_COLLECTOR_CONCURRENCY: "${HOSTED_COLLECTOR_CONCURRENCY:-3}"
+      COOKIE_SECURE: always
+      TRUST_PROXY_HEADERS: "1"
+      MAX_IMPORT_BYTES: "${MAX_IMPORT_BYTES:-33554432}"
+      MAX_IMPORT_EXPANDED_BYTES: "${MAX_IMPORT_EXPANDED_BYTES:-67108864}"
+      MAX_SOURCE_EXPANDED_BYTES: "${MAX_SOURCE_EXPANDED_BYTES:-268435456}"
+    secrets:
+      - bootstrap_token
+      - vrchat_session_key
+    volumes:
+      - monitor-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN_FILE: /run/secrets/tunnel_token
+      TUNNEL_URL: http://vrchat-monitor:8080
+    secrets:
+      - tunnel_token
+    depends_on:
+      vrchat-monitor:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  backup:
+    image: presence-monitor:local
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "scripts.backup_hosted"]
+    command: ["--database", "/data/hosted.sqlite3", "--output", "/backups", "--keep", "48", "--instance-id", "production"]
+    volumes:
+      # A live WAL reader may need SQLite shared-memory bookkeeping even
+      # though backup_hosted opens the database mode=ro + query_only.
+      - monitor-data:/data
+      - ./backups:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+
+  backup-scheduler:
+    image: presence-monitor:local
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "scripts.backup_hosted"]
+    command: ["--database", "/data/hosted.sqlite3", "--output", "/backups", "--keep", "48", "--instance-id", "production", "--interval-seconds", "3600"]
+    depends_on:
+      vrchat-monitor:
+        condition: service_healthy
+    volumes:
+      - monitor-data:/data
+      - ./backups:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.backup_hosted", "--output", "/backups", "--health", "--max-age-seconds", "7200"]
+      interval: 5m
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  offsite-backup:
+    image: presence-monitor:local
+    profiles: ["offsite"]
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "scripts.r2_backup"]
+    command:
+      - --backup-dir
+      - /backups
+      - --state-dir
+      - /backups
+      - --remote-url
+      - "${BACKUP_REMOTE_URL:-}"
+      - --token-file
+      - /run/secrets/backup_token
+      - --instance-id
+      - production
+      - --interval-seconds
+      - "3600"
+      - --drill-interval-seconds
+      - "86400"
+    secrets:
+      - backup_token
+    depends_on:
+      backup-scheduler:
+        condition: service_healthy
+    volumes:
+      - ./backups:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.r2_backup", "--backup-dir", "/backups", "--state-dir", "/backups", "--health", "--max-upload-age-seconds", "7200", "--max-drill-age-seconds", "93600"]
+      interval: 5m
+      timeout: 5s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  monitor-data:
+
+secrets:
+  bootstrap_token:
+    file: ${BOOTSTRAP_TOKEN_SECRET_FILE:-./.secrets/bootstrap_token}
+  tunnel_token:
+    file: ${TUNNEL_TOKEN_SECRET_FILE:-./.secrets/tunnel_token}
+  backup_token:
+    file: ${BACKUP_TOKEN_SECRET_FILE:-./.secrets/backup_token}
+  vrchat_session_key:
+    file: ${VRCHAT_SESSION_KEY_SECRET_FILE:-./.secrets/vrchat_session_key}
