@@ -322,33 +322,29 @@ async function readJson(request, maximumBytes) {
   }
 }
 
-function exactLengthStream(body, expectedBytes) {
+async function readExactBytes(body, expectedBytes) {
   const reader = body.getReader();
   let received = 0;
-  return new ReadableStream({
-    async pull(controller) {
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          if (received !== expectedBytes) throw new HttpError(400);
-          controller.close();
-          return;
-        }
-        const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-        received += chunk.byteLength;
-        if (received > expectedBytes || received > PART_BYTES) {
-          await reader.cancel().catch(() => undefined);
-          throw new HttpError(received > PART_BYTES ? 413 : 400);
-        }
-        controller.enqueue(chunk);
-      } catch (error) {
-        controller.error(error);
-      }
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
+  const chunks = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+    received += chunk.byteLength;
+    if (received > expectedBytes || received > PART_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new HttpError(received > PART_BYTES ? 413 : 400);
+    }
+    chunks.push(chunk);
+  }
+  if (received !== expectedBytes) throw new HttpError(400);
+  const combined = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return combined;
 }
 
 function requireOnlyQuery(url, names) {
@@ -492,7 +488,7 @@ async function uploadPart(request, env, url, encodedUploadId, partText) {
   try {
     const part = await upload.uploadPart(
       partNumber,
-      exactLengthStream(request.body, contentLength),
+      await readExactBytes(request.body, contentLength),
     );
     if (
       !part ||
