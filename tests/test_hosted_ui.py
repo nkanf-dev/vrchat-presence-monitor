@@ -6,12 +6,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HostedUiTests(unittest.TestCase):
-    def test_login_page_uses_friendly_access_code_language(self):
+    def test_login_page_uses_direct_vrchat_login_language(self):
         screens = (ROOT / "web/src/components/AuthScreens.tsx").read_text(encoding="utf-8")
         data_view = (ROOT / "web/src/views/DataView.tsx").read_text(encoding="utf-8")
 
-        self.assertIn("打开你的监控面板", screens)
-        self.assertIn("访问码只用于这个监控站点，不是 VRChat 密码", screens)
+        self.assertIn("登录 VRChat", screens)
+        self.assertIn("使用你的 VRChat 账号登录。", screens)
+        self.assertNotIn("登录并恢复", screens)
+        self.assertNotIn("访问码", screens)
         self.assertIn("导入预览", data_view)
         self.assertNotIn("viewer token", screens.lower())
         self.assertNotIn("collector token", screens.lower())

@@ -161,7 +161,7 @@ describe('product state machine', () => {
     expect(screen.queryByLabelText('VRChat 账号')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('密码')).not.toBeInTheDocument();
     await user.type(code, '123456');
-    await user.click(screen.getByRole('button', { name: '登录' }));
+    await user.click(screen.getByRole('button', { name: '验证并继续' }));
 
     expect(await screen.findByRole('heading', { name: '状态总览' })).toBeVisible();
     expect(fetchMock.mock.calls[2]).toEqual([
@@ -190,7 +190,7 @@ describe('product state machine', () => {
     await user.type(screen.getByLabelText('密码'), 'correct horse');
     await user.click(screen.getByRole('button', { name: '登录' }));
     await user.type(await screen.findByLabelText('验证码'), '000000');
-    await user.click(screen.getByRole('button', { name: '登录' }));
+    await user.click(screen.getByRole('button', { name: '验证并继续' }));
 
     expect(await screen.findByText('验证码不正确，请重试。')).toBeVisible();
     expect(screen.getByLabelText('验证码')).toBeVisible();

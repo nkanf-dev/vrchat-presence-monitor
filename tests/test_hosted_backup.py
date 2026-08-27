@@ -151,16 +151,10 @@ class HostedBackupTests(unittest.TestCase):
             compose,
         )
 
-        readme = (project / "README.md").read_text(encoding="utf-8")
-        self.assertIn(
-            'sudo chown "10001:${operator_gid}" .secrets/bootstrap_token', readme
-        )
-        self.assertIn(
-            'sudo chown "65532:${operator_gid}" .secrets/tunnel_token', readme
-        )
-        self.assertIn(
-            'sudo chown "10001:${operator_gid}" .secrets/backup_token', readme
-        )
+        deployment = (project / "docs/deployment.md").read_text(encoding="utf-8")
+        self.assertIn("token files to owner UID `10001`", deployment)
+        self.assertIn("tunnel token to owner UID `65532`", deployment)
+        self.assertIn("operator's primary GID and mode `0440`", deployment)
 
         offsite = compose.split("  offsite-backup:", 1)[1].split("\nvolumes:", 1)[0]
         self.assertNotIn("/data", offsite)

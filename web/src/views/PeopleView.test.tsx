@@ -43,8 +43,9 @@ describe('PeopleView URL state', () => {
     );
 
     expect(await screen.findByText('Alice')).toBeVisible();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    expect(fetchMock.mock.calls[0]?.[0]).toContain('offset=48');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const friendsRequest = fetchMock.mock.calls.find(([url]) => String(url).includes('/v1/friends'));
+    expect(friendsRequest?.[0]).toContain('offset=48');
     expect(new URLSearchParams(window.location.hash.slice(1)).get('peoplePage')).toBe('3');
     expect(screen.getByRole('status', { name: '' })).toHaveTextContent('第 3 / 5 页');
   });
