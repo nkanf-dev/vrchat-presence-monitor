@@ -3,8 +3,10 @@ from __future__ import annotations
 import csv
 import copy
 import base64
+import hashlib
 import io
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -17,14 +19,15 @@ from .vrchat import world_id_from_location
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -40,7 +43,16 @@ class Database:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
+        for attempt in range(100):
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).lower() or attempt == 99:
+                    connection.close()
+                    raise
+                time.sleep(0.03)
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
@@ -60,6 +72,7 @@ class Database:
         with self._lock, self._connection() as db:
             db.executescript(
                 """
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -83,6 +96,7 @@ class Database:
                 );
                 CREATE TABLE IF NOT EXISTS status_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_event_id TEXT NOT NULL DEFAULT '',
                     friend_id TEXT NOT NULL,
                     occurred_at TEXT NOT NULL,
                     old_status TEXT NOT NULL,
@@ -98,6 +112,7 @@ class Database:
                     ON status_events(occurred_at);
                 CREATE TABLE IF NOT EXISTS sync_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_run_id TEXT NOT NULL DEFAULT '',
                     started_at TEXT NOT NULL,
                     finished_at TEXT,
                     source TEXT NOT NULL,
@@ -107,6 +122,7 @@ class Database:
                 );
                 CREATE TABLE IF NOT EXISTS raw_fetches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_fetch_id TEXT NOT NULL DEFAULT '',
                     occurred_at TEXT NOT NULL,
                     method TEXT NOT NULL,
                     path TEXT NOT NULL,
@@ -131,6 +147,105 @@ class Database:
             for name, definition in migrations.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE friends ADD COLUMN {name} {definition}")
+            self._migrate_record_ids(
+                db, "status_events", "client_event_id", "event", "idx_status_events_client_id"
+            )
+            self._migrate_record_ids(
+                db, "sync_runs", "client_run_id", "run", "idx_sync_runs_client_id"
+            )
+            self._migrate_record_ids(
+                db, "raw_fetches", "client_fetch_id", "fetch", "idx_raw_fetches_client_id"
+            )
+
+    @staticmethod
+    def _new_record_id(prefix: str) -> str:
+        return f"{prefix}_{secrets.token_hex(16)}"
+
+    @classmethod
+    def _migrate_record_ids(
+        cls,
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        prefix: str,
+        index: str,
+    ) -> None:
+        columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        for row in db.execute(f"SELECT * FROM {table} WHERE {column}='' ORDER BY id").fetchall():
+            identity: list[list[Any]] = []
+            for name in row.keys():
+                if name == column:
+                    continue
+                value = row[name]
+                if isinstance(value, (bytes, bytearray, memoryview)):
+                    body = bytes(value)
+                    value = {
+                        "bytes": len(body),
+                        "sha256": hashlib.sha256(body).hexdigest(),
+                    }
+                identity.append([name, value])
+            encoded = json.dumps(
+                [table, identity],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            record_id = (
+                f"legacy_{prefix}_{int(row['id'])}_{hashlib.sha256(encoded).hexdigest()}"
+            )
+            existing = db.execute(
+                f"SELECT id FROM {table} WHERE {column}=?",
+                (record_id,),
+            ).fetchone()
+            if existing is not None and int(existing["id"]) != int(row["id"]):
+                raise RuntimeError(f"{table} 旧记录的稳定 ID 发生冲突")
+            db.execute(
+                f"UPDATE {table} SET {column}=? WHERE id=? AND {column}=''",
+                (record_id, int(row["id"])),
+            )
+        db.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {index} ON {table}({column})")
+
+    @classmethod
+    def _insert_with_generated_id(
+        cls,
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        prefix: str,
+        sql: str,
+        values: tuple[Any, ...],
+    ) -> sqlite3.Cursor:
+        for _ in range(5):
+            try:
+                return db.execute(sql, (cls._new_record_id(prefix), *values))
+            except sqlite3.IntegrityError as error:
+                if f"{table}.{column}" not in str(error):
+                    raise
+        raise RuntimeError(f"无法为 {table} 生成唯一记录 ID")
+
+    @classmethod
+    def _insert_status_event(
+        cls,
+        db: sqlite3.Connection,
+        friend_id: str,
+        occurred_at: str,
+        old_status: str,
+        new_status: str,
+        location: str,
+        platform: str,
+        source: str,
+    ) -> sqlite3.Cursor:
+        return cls._insert_with_generated_id(
+            db,
+            "status_events",
+            "client_event_id",
+            "event",
+            """INSERT INTO status_events
+            (client_event_id, friend_id, occurred_at, old_status, new_status, location, platform, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (friend_id, occurred_at, old_status, new_status, location, platform, source),
+        )
 
     def setting(self, key: str, default: str | None = None) -> str | None:
         with self._lock, self._connection() as db:
@@ -151,8 +266,13 @@ class Database:
 
     def begin_sync(self, source: str) -> int:
         with self._lock, self._connection() as db:
-            cur = db.execute(
-                "INSERT INTO sync_runs(started_at, source, status) VALUES(?, ?, 'running')",
+            cur = self._insert_with_generated_id(
+                db,
+                "sync_runs",
+                "client_run_id",
+                "run",
+                """INSERT INTO sync_runs(client_run_id, started_at, source, status)
+                VALUES (?, ?, ?, 'running')""",
                 (utc_now(), source),
             )
             return int(cur.lastrowid)
@@ -180,10 +300,14 @@ class Database:
         so this remains in the local SQLite database alongside the existing monitor data.
         """
         with self._lock, self._connection() as db:
-            db.execute(
+            self._insert_with_generated_id(
+                db,
+                "raw_fetches",
+                "client_fetch_id",
+                "fetch",
                 """INSERT INTO raw_fetches
-                (occurred_at, method, path, status_code, content_type, body, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (client_fetch_id, occurred_at, method, path, status_code, content_type, body, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (utc_now(), str(method or "GET"), str(path or ""), status_code,
                  str(content_type or ""), sqlite3.Binary(body or b""), str(error or "")[:500]),
             )
@@ -287,11 +411,15 @@ class Database:
                          friend["avatar_image_url"], friend["bio"], friend["bio_links"],
                          now if friend["status"] not in {"offline", ""} else None, now, now),
                     )
-                    db.execute(
-                        """INSERT INTO status_events
-                        (friend_id, occurred_at, old_status, new_status, location, platform, source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (friend["id"], now, "unknown", friend["status"], friend["location"], friend["platform"], source),
+                    self._insert_status_event(
+                        db,
+                        friend["id"],
+                        now,
+                        "unknown",
+                        friend["status"],
+                        friend["location"],
+                        friend["platform"],
+                        source,
                     )
                     changed += 1
                     continue
@@ -318,11 +446,15 @@ class Database:
                      friend["bio"], friend["bio_links"], last_seen, last_changed, now, friend["id"]),
                 )
                 if status_changed or location_changed or platform_changed:
-                    db.execute(
-                        """INSERT INTO status_events
-                        (friend_id, occurred_at, old_status, new_status, location, platform, source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (friend["id"], now, old_status, friend["status"], friend["location"], friend["platform"], source),
+                    self._insert_status_event(
+                        db,
+                        friend["id"],
+                        now,
+                        old_status,
+                        friend["status"],
+                        friend["location"],
+                        friend["platform"],
+                        source,
                     )
                     changed += 1
         return changed
@@ -336,11 +468,15 @@ class Database:
                 if row["id"] in seen_ids:
                     continue
                 db.execute("UPDATE friends SET status='offline', last_changed=?, updated_at=? WHERE id=?", (now, now, row["id"]))
-                db.execute(
-                    """INSERT INTO status_events
-                    (friend_id, occurred_at, old_status, new_status, location, platform, source)
-                    VALUES (?, ?, ?, 'offline', ?, ?, ?)""",
-                    (row["id"], now, row["status"], row["location"], row["platform"], source),
+                self._insert_status_event(
+                    db,
+                    row["id"],
+                    now,
+                    row["status"],
+                    "offline",
+                    row["location"],
+                    row["platform"],
+                    source,
                 )
                 changed += 1
             return changed
@@ -365,11 +501,15 @@ class Database:
                         and str(row["event_location"] or "") == str(row["location"] or "") \
                         and str(row["event_platform"] or "") == str(row["platform"] or ""):
                     continue
-                db.execute(
-                    """INSERT INTO status_events
-                    (friend_id, occurred_at, old_status, new_status, location, platform, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (row["id"], now, str(row["event_status"] or "unknown"), row["status"], row["location"], row["platform"], source),
+                self._insert_status_event(
+                    db,
+                    row["id"],
+                    now,
+                    str(row["event_status"] or "unknown"),
+                    row["status"],
+                    row["location"],
+                    row["platform"],
+                    source,
                 )
                 inserted += 1
         return inserted
@@ -504,6 +644,7 @@ class Database:
     def json_export(self) -> dict[str, Any]:
         """Export recoverable local data without settings or authentication material."""
         with self._lock, self._connection() as db:
+            db.execute("BEGIN")
             friends = [dict(row) for row in db.execute("SELECT * FROM friends ORDER BY id").fetchall()]
             events = [dict(row) for row in db.execute("SELECT * FROM status_events ORDER BY id").fetchall()]
             sync_runs = [dict(row) for row in db.execute("SELECT * FROM sync_runs ORDER BY id").fetchall()]
@@ -515,7 +656,7 @@ class Database:
                 raw_fetches.append(item)
         return {
             "format": "vrchat-monitor-backup",
-            "version": 1,
+            "version": 2,
             "exported_at": utc_now(),
             "friends": friends,
             "status_events": events,
@@ -523,33 +664,155 @@ class Database:
             "raw_fetches": raw_fetches,
         }
 
+    @staticmethod
+    def _backup_collection(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        if key not in payload:
+            return []
+        value = payload[key]
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise ValueError(f"备份字段 {key} 格式无效")
+        return value
+
+    @staticmethod
+    def _backup_record_id(
+        version: int,
+        item: dict[str, Any],
+        key: str,
+        prefix: str,
+        index: int,
+        identity: tuple[Any, ...],
+    ) -> str:
+        if version == 2:
+            value = item.get(key)
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value) > 256
+            ):
+                raise ValueError(f"v2 备份第 {index + 1} 条 {prefix} 记录缺少有效稳定 ID")
+            return value
+        legacy_id = item.get("id") if item.get("id") is not None else f"row-{index}"
+        encoded = json.dumps(
+            [legacy_id, *identity],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        legacy_label = str(legacy_id)
+        if (
+            not legacy_label
+            or len(legacy_label) > 32
+            or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in legacy_label)
+        ):
+            legacy_label = hashlib.sha256(legacy_label.encode("utf-8")).hexdigest()[:16]
+        return f"legacy_{prefix}_{legacy_label}_{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _merge_append_record(
+        db: sqlite3.Connection,
+        label: str,
+        select_sql: str,
+        insert_sql: str,
+        record_id: str,
+        values: tuple[Any, ...],
+    ) -> int:
+        existing = db.execute(select_sql, (record_id,)).fetchone()
+        if existing is not None:
+            if tuple(existing) != values:
+                raise ValueError(f"备份中的 {label} 稳定 ID 与现有记录内容冲突")
+            return 0
+        db.execute(insert_sql, (record_id, *values))
+        return 1
+
+    @staticmethod
+    def _backup_bio_links(item: dict[str, Any]) -> str:
+        value = item.get("bio_links", item.get("bioLinks", []))
+        if isinstance(value, list):
+            return json.dumps([str(link) for link in value], ensure_ascii=False)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as error:
+                raise ValueError("备份中的好友简介链接格式无效") from error
+            if not isinstance(parsed, list):
+                raise ValueError("备份中的好友简介链接格式无效")
+            return value
+        raise ValueError("备份中的好友简介链接格式无效")
+
+    @staticmethod
+    def _backup_boolean(value: Any, label: str) -> int:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int) and value in (0, 1):
+            return value
+        raise ValueError(f"备份中的{label}格式无效")
+
+    @staticmethod
+    def _backup_timestamp(value: Any, label: str, *, optional: bool = False) -> str | None:
+        if value is None and optional:
+            return None
+        if not isinstance(value, str) or parse_time(value) is None:
+            raise ValueError(f"备份中的{label}无效")
+        return value
+
     def json_import(self, payload: dict[str, Any]) -> dict[str, int]:
         """Merge a backup. It never deletes rows and never imports settings/cookies."""
         if not isinstance(payload, dict) or payload.get("format") != "vrchat-monitor-backup":
             raise ValueError("不是有效的 VRChat Monitor 备份文件")
-        if int(payload.get("version", 0)) != 1:
+        version = payload.get("version")
+        if isinstance(version, bool) or version not in (1, 2):
             raise ValueError("不支持的备份版本")
         imported = {"friends": 0, "status_events": 0, "sync_runs": 0, "raw_fetches": 0}
-        friends = payload.get("friends") if isinstance(payload.get("friends"), list) else []
-        events = payload.get("status_events") if isinstance(payload.get("status_events"), list) else []
-        sync_runs = payload.get("sync_runs") if isinstance(payload.get("sync_runs"), list) else []
-        raw_fetches = payload.get("raw_fetches") if isinstance(payload.get("raw_fetches"), list) else []
+        friends = self._backup_collection(payload, "friends")
+        events = self._backup_collection(payload, "status_events")
+        sync_runs = self._backup_collection(payload, "sync_runs")
+        raw_fetches = self._backup_collection(payload, "raw_fetches")
         with self._lock, self._connection() as db:
-            for item in friends:
-                if not isinstance(item, dict) or not item.get("id"):
-                    continue
+            db.execute("BEGIN IMMEDIATE")
+            for index, item in enumerate(friends):
+                if not item.get("id"):
+                    raise ValueError(f"备份第 {index + 1} 条好友记录缺少 ID")
                 friend_id = str(item["id"])
-                exists = db.execute("SELECT 1 FROM friends WHERE id=?", (friend_id,)).fetchone()
+                exists = db.execute(
+                    """SELECT username,display_name,is_self,status,status_description,
+                    location,platform,avatar_url,avatar_image_url,bio,bio_links,
+                    last_seen,last_changed,updated_at FROM friends WHERE id=?""",
+                    (friend_id,),
+                ).fetchone()
+                updated_at = item.get("updated_at")
+                if updated_at is not None and (
+                    not isinstance(updated_at, str) or parse_time(updated_at) is None
+                ):
+                    raise ValueError(f"备份第 {index + 1} 条好友记录的更新时间无效")
+                updated_at = updated_at or "1970-01-01T00:00:00+00:00"
                 values = (
                     str(item.get("username") or friend_id), str(item.get("display_name") or item.get("displayName") or friend_id),
-                    int(bool(item.get("is_self"))), str(item.get("status") or "offline"),
+                    self._backup_boolean(item.get("is_self", 0), "本人标记"), str(item.get("status") or "offline"),
                     str(item.get("status_description") or ""), str(item.get("location") or ""),
                     str(item.get("platform") or ""), str(item.get("avatar_url") or ""),
                     str(item.get("avatar_image_url") or ""), str(item.get("bio") or ""),
-                    json.dumps(item.get("bio_links") if isinstance(item.get("bio_links"), list) else [], ensure_ascii=False),
-                    item.get("last_seen"), item.get("last_changed"), item.get("updated_at") or utc_now(), friend_id,
+                    self._backup_bio_links(item),
+                    item.get("last_seen"), item.get("last_changed"), updated_at, friend_id,
                 )
                 if exists:
+                    existing_updated_at = parse_time(str(exists["updated_at"] or ""))
+                    incoming_updated_at = parse_time(updated_at)
+                    if (
+                        existing_updated_at is not None
+                        and incoming_updated_at is not None
+                        and incoming_updated_at < existing_updated_at
+                    ):
+                        continue
+                    if (
+                        existing_updated_at is not None
+                        and incoming_updated_at is not None
+                        and incoming_updated_at == existing_updated_at
+                    ):
+                        if tuple(exists)[:-1] != values[:-2]:
+                            raise ValueError(
+                                "备份中的好友快照时间相同但内容不同；导入已回滚"
+                            )
+                        continue
                     db.execute(
                         """UPDATE friends SET username=?, display_name=?, is_self=?, status=?, status_description=?,
                         location=?, platform=?, avatar_url=?, avatar_image_url=?, bio=?, bio_links=?, last_seen=?, last_changed=?, updated_at=?
@@ -562,46 +825,123 @@ class Database:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", values,
                     )
                 imported["friends"] += 1
-            for item in events:
-                if not isinstance(item, dict) or not item.get("friend_id") or not item.get("occurred_at"):
-                    continue
+            for index, item in enumerate(events):
+                if not item.get("friend_id") or not item.get("occurred_at"):
+                    raise ValueError(f"备份第 {index + 1} 条状态记录缺少玩家或时间")
+                occurred_at = self._backup_timestamp(item["occurred_at"], "状态记录时间")
                 values = (
-                    str(item["friend_id"]), str(item["occurred_at"]), str(item.get("old_status") or "unknown"),
+                    str(item["friend_id"]), occurred_at, str(item.get("old_status") or "unknown"),
                     str(item.get("new_status") or "offline"), str(item.get("location") or ""),
                     str(item.get("platform") or ""), str(item.get("source") or "import"),
                 )
-                cursor = db.execute(
-                    """INSERT INTO status_events (friend_id, occurred_at, old_status, new_status, location, platform, source)
-                    SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM friends WHERE id=?) AND NOT EXISTS (
-                        SELECT 1 FROM status_events WHERE friend_id=? AND occurred_at=? AND old_status=? AND new_status=?
-                        AND location=? AND platform=? AND source=?)""",
-                    (*values, values[0], *values),
+                if db.execute("SELECT 1 FROM friends WHERE id=?", (values[0],)).fetchone() is None:
+                    raise ValueError(f"备份第 {index + 1} 条状态记录引用了不存在的好友")
+                record_id = self._backup_record_id(
+                    version,
+                    item,
+                    "client_event_id",
+                    "event",
+                    index,
+                    values,
                 )
-                imported["status_events"] += int(cursor.rowcount > 0)
-            for item in sync_runs:
-                if not isinstance(item, dict) or not item.get("started_at"):
-                    continue
-                values = (str(item.get("started_at")), item.get("finished_at"), str(item.get("source") or "import"),
-                          str(item.get("status") or "unknown"), item.get("friend_count"), item.get("error"))
-                exists = db.execute("SELECT 1 FROM sync_runs WHERE started_at=? AND source=? AND status=?", (values[0], values[2], values[3])).fetchone()
-                if not exists:
-                    db.execute("INSERT INTO sync_runs (started_at, finished_at, source, status, friend_count, error) VALUES (?, ?, ?, ?, ?, ?)", values)
-                    imported["sync_runs"] += 1
-            for item in raw_fetches:
-                if not isinstance(item, dict) or not item.get("occurred_at"):
-                    continue
+                imported["status_events"] += self._merge_append_record(
+                    db,
+                    "状态",
+                    """SELECT friend_id, occurred_at, old_status, new_status, location, platform, source
+                    FROM status_events WHERE client_event_id=?""",
+                    """INSERT INTO status_events
+                    (client_event_id, friend_id, occurred_at, old_status, new_status, location, platform, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    record_id,
+                    values,
+                )
+            for index, item in enumerate(sync_runs):
+                if not item.get("started_at"):
+                    raise ValueError(f"备份第 {index + 1} 条同步记录缺少开始时间")
+                started_at = self._backup_timestamp(item["started_at"], "同步开始时间")
+                friend_count = item.get("friend_count", 0)
+                if isinstance(friend_count, bool) or not isinstance(friend_count, int):
+                    raise ValueError(f"备份第 {index + 1} 条同步记录的好友数量无效")
+                finished_at = item.get("finished_at")
+                finished_at = self._backup_timestamp(
+                    finished_at,
+                    "同步结束时间",
+                    optional=True,
+                )
+                values = (
+                    started_at,
+                    finished_at,
+                    str(item.get("source") or "import"),
+                    str(item.get("status") or "unknown"),
+                    friend_count,
+                    str(item.get("error") or ""),
+                )
+                record_id = self._backup_record_id(
+                    version,
+                    item,
+                    "client_run_id",
+                    "run",
+                    index,
+                    values,
+                )
+                imported["sync_runs"] += self._merge_append_record(
+                    db,
+                    "同步",
+                    """SELECT started_at, finished_at, source, status, friend_count, error
+                    FROM sync_runs WHERE client_run_id=?""",
+                    """INSERT INTO sync_runs
+                    (client_run_id, started_at, finished_at, source, status, friend_count, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    record_id,
+                    values,
+                )
+            for index, item in enumerate(raw_fetches):
+                if not item.get("occurred_at"):
+                    raise ValueError(f"备份第 {index + 1} 条原始响应缺少时间")
+                occurred_at = self._backup_timestamp(item["occurred_at"], "原始响应时间")
+                encoded_body = item.get("body_b64", "")
+                if not isinstance(encoded_body, str):
+                    raise ValueError(f"备份第 {index + 1} 条原始响应正文格式无效")
                 try:
-                    body = base64.b64decode(str(item.get("body_b64") or ""), validate=True)
-                except (ValueError, base64.binascii.Error):
-                    continue
-                if len(body) > 8 * 1024 * 1024:
-                    continue
-                values = (str(item.get("occurred_at")), str(item.get("method") or "GET"), str(item.get("path") or ""),
-                          item.get("status_code"), str(item.get("content_type") or ""), body, str(item.get("error") or ""))
-                exists = db.execute("SELECT 1 FROM raw_fetches WHERE occurred_at=? AND method=? AND path=? AND status_code=?", values[:4]).fetchone()
-                if not exists:
-                    db.execute("INSERT INTO raw_fetches (occurred_at, method, path, status_code, content_type, body, error) VALUES (?, ?, ?, ?, ?, ?, ?)", values)
-                    imported["raw_fetches"] += 1
+                    body = base64.b64decode(encoded_body, validate=True)
+                except (ValueError, base64.binascii.Error) as error:
+                    raise ValueError(
+                        f"备份第 {index + 1} 条原始响应正文不是有效 Base64"
+                    ) from error
+                status_code = item.get("status_code")
+                if status_code is not None and (
+                    isinstance(status_code, bool) or not isinstance(status_code, int)
+                ):
+                    raise ValueError(f"备份第 {index + 1} 条原始响应状态码无效")
+                values = (
+                    occurred_at,
+                    str(item.get("method") or "GET"),
+                    str(item.get("path") or ""),
+                    status_code,
+                    str(item.get("content_type") or ""),
+                    body,
+                    str(item.get("error") or ""),
+                )
+                identity = (*values[:5], hashlib.sha256(body).hexdigest(), values[6])
+                record_id = self._backup_record_id(
+                    version,
+                    item,
+                    "client_fetch_id",
+                    "fetch",
+                    index,
+                    identity,
+                )
+                imported["raw_fetches"] += self._merge_append_record(
+                    db,
+                    "原始响应",
+                    """SELECT occurred_at, method, path, status_code, content_type, body, error
+                    FROM raw_fetches WHERE client_fetch_id=?""",
+                    """INSERT INTO raw_fetches
+                    (client_fetch_id, occurred_at, method, path, status_code, content_type, body, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    record_id,
+                    values,
+                )
         return imported
 
     def last_sync(self) -> dict[str, Any] | None:

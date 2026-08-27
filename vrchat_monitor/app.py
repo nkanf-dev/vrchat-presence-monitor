@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from .backup_io import MAX_JSON_BACKUP_BYTES, decode_backup_upload, encode_backup_gzip
 from .db import Database
 from .http_assets import static_asset_for_request
 from .vrchat import CredentialStore, VRChatClient, VRChatError, event_to_friend, world_id_from_location
@@ -261,10 +262,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def _body(self, max_bytes: int = 1024 * 1024) -> dict[str, Any]:
+        raw = self._raw_body(max_bytes)
+        return json.loads(raw.decode("utf-8")) if raw else {}
+
+    def _raw_body(self, max_bytes: int) -> bytes:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > max_bytes:
+        if length < 0 or length > max_bytes:
             raise ValueError("request too large")
-        return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        raw = self.rfile.read(length) if length else b""
+        if len(raw) != length:
+            raise ValueError("request body incomplete")
+        return raw
 
     def do_GET(self) -> None:
         if self.path == "/api/state":
@@ -350,11 +358,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
             return
         if self.path == "/api/export.json":
-            raw = json.dumps(monitor.db.json_export(), ensure_ascii=False, indent=2).encode("utf-8")
+            raw = encode_backup_gzip(monitor.db.json_export())
             self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="vrchat-monitor-backup.json"')
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition", 'attachment; filename="vrchat-monitor-backup.json.gz"')
             self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(raw)
             return
@@ -362,7 +371,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
-            body = self._body(64 * 1024 * 1024 if self.path == "/api/import.json" else 1024 * 1024)
+            if self.path == "/api/import.json":
+                body = decode_backup_upload(self._raw_body(MAX_JSON_BACKUP_BYTES))
+            else:
+                body = self._body(1024 * 1024)
             if self.path == "/api/login":
                 if not body.get("username") or not body.get("password"):
                     self._json({"error": "请输入账号和密码"}, 400)
