@@ -24,6 +24,7 @@ try:
     from scripts.backup_format import (
         BackupArtifact,
         FORMAT,
+        MAX_DATABASE_BYTES,
         manifest_path_for,
         read_manifest,
         sha256_file,
@@ -34,6 +35,7 @@ except ModuleNotFoundError:  # Direct execution: python scripts/r2_backup.py
     from backup_format import (  # type: ignore[no-redef]
         BackupArtifact,
         FORMAT,
+        MAX_DATABASE_BYTES,
         manifest_path_for,
         read_manifest,
         sha256_file,
@@ -42,13 +44,19 @@ except ModuleNotFoundError:  # Direct execution: python scripts/r2_backup.py
     )
 
 
-PART_BYTES = 8 * 1024 * 1024
+MAX_PART_BYTES = 8 * 1024 * 1024
+PART_BYTES = MAX_PART_BYTES
+MAX_PARTS = 10_000
+MAX_GZIP_BYTES = 64 * 1024 * 1024 * 1024
+MAX_CREATE_JSON_BYTES = 32 * 1024
+MAX_COMPLETE_JSON_BYTES = 4 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024
 RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 TIERS = frozenset({"hourly", "daily", "monthly"})
 STATE_FORMAT = "presence-monitor-r2-state/v1"
 _INSTANCE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_ETAG_RE = re.compile(r"^[A-Za-z0-9._~:+/=-]{1,256}$")
 _KEY_RE = re.compile(
     r"^backups/[a-z0-9][a-z0-9_-]{0,63}/(hourly|daily|monthly)/"
     r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-[0-9a-f]{64}\.sqlite3\.gz$"
@@ -63,6 +71,20 @@ _HEADER_FIELDS = {
     "gzip_sha256": "X-Backup-Gzip-SHA256",
     "schema_version": "X-Backup-Schema-Version",
 }
+
+_MAX_PART_DESCRIPTOR_JSON_BYTES = (
+    len('{"part_number":,"etag":""}') + len(str(MAX_PARTS)) + 256
+)
+_MAX_COMPLETE_PAYLOAD_BYTES = (
+    len('{"parts":[]}')
+    + (_MAX_PART_DESCRIPTOR_JSON_BYTES * MAX_PARTS)
+    + (MAX_PARTS - 1)
+)
+if (
+    MAX_GZIP_BYTES > MAX_PART_BYTES * MAX_PARTS
+    or MAX_COMPLETE_JSON_BYTES < _MAX_COMPLETE_PAYLOAD_BYTES
+):
+    raise RuntimeError("invalid multipart capacity limits")
 
 
 class PermanentBackupError(RuntimeError):
@@ -132,6 +154,10 @@ def _normalize_metadata(payload: Mapping[str, object], *, key: str | None = None
         if number < 1:
             raise PermanentBackupError(f"backup {field} is invalid")
         normalized[field] = number
+    if normalized["database_bytes"] > MAX_DATABASE_BYTES:
+        raise PermanentBackupError("backup database_bytes is invalid")
+    if normalized["gzip_bytes"] > MAX_GZIP_BYTES:
+        raise PermanentBackupError("backup gzip_bytes is invalid")
     if normalized["schema_version"] != 1:
         raise PermanentBackupError("backup schema version is unsupported")
     for field in ("database_sha256", "gzip_sha256"):
@@ -181,7 +207,7 @@ class R2BackupClient:
         self.timeout = max(1.0, min(float(timeout), 300.0))
         self.attempts = max(1, min(int(attempts), 10))
         self.sleeper = sleeper
-        self.part_bytes = max(1, min(int(part_bytes), 64 * 1024 * 1024))
+        self.part_bytes = max(1, min(int(part_bytes), MAX_PART_BYTES))
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
     def _token(self) -> str:
@@ -311,11 +337,14 @@ class R2BackupClient:
         payload: Mapping[str, object] | None = None,
         query: Mapping[str, str] | None = None,
         accepted: frozenset[int] = frozenset({200}),
+        max_request_bytes: int = MAX_CREATE_JSON_BYTES,
     ) -> dict[str, object]:
         data = None
         headers: dict[str, str] = {}
         if payload is not None:
             data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if len(data) > max_request_bytes:
+                raise PermanentBackupError("backup gateway JSON request is too large")
             headers["Content-Type"] = "application/json"
         return self._execute(
             method,
@@ -367,8 +396,12 @@ class R2BackupClient:
         instance_id = _instance(instance_id)
         tier = _tier(tier)
         metadata = _normalize_metadata(artifact.metadata)
-        if artifact.archive.stat().st_size != metadata["gzip_bytes"]:
+        archive_bytes = artifact.archive.stat().st_size
+        if archive_bytes != metadata["gzip_bytes"]:
             raise PermanentBackupError("local backup size does not match its manifest")
+        expected_parts = (archive_bytes + self.part_bytes - 1) // self.part_bytes
+        if expected_parts > MAX_PARTS:
+            raise PermanentBackupError("backup archive requires more than 10,000 parts")
         if sha256_file(artifact.archive) != metadata["gzip_sha256"]:
             raise PermanentBackupError("local backup checksum does not match its manifest")
         expected_key = _expected_key(metadata, instance_id, tier)
@@ -399,6 +432,8 @@ class R2BackupClient:
                     chunk = handle.read(self.part_bytes)
                     if not chunk:
                         break
+                    if part_number > MAX_PARTS:
+                        raise PermanentBackupError("backup archive requires more than 10,000 parts")
                     response = self._execute(
                         "PUT",
                         f"/v1/uploads/{encoded_upload}/parts/{part_number}",
@@ -413,12 +448,14 @@ class R2BackupClient:
                     )
                     returned_number = response.get("part_number")
                     etag = str(response.get("etag", ""))
-                    if returned_number != part_number or not etag or len(etag) > 256:
+                    if returned_number != part_number or not _ETAG_RE.fullmatch(etag):
                         raise PermanentBackupError("backup gateway returned an invalid part receipt")
                     parts.append({"part_number": part_number, "etag": etag})
                     part_number += 1
             if not parts:
                 raise PermanentBackupError("backup archive is empty")
+            if len(parts) != expected_parts:
+                raise PermanentBackupError("backup archive size changed during upload")
             try:
                 self._json_request(
                     "POST",
@@ -426,6 +463,7 @@ class R2BackupClient:
                     query={"key": key},
                     payload={"parts": parts},
                     accepted=frozenset({200, 201}),
+                    max_request_bytes=MAX_COMPLETE_JSON_BYTES,
                 )
             except (BackupTransportError, PermanentBackupError):
                 try:

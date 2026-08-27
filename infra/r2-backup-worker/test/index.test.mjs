@@ -5,13 +5,20 @@ import test from "node:test";
 
 import worker, {
   authorize,
+  MULTIPART_LIMITS,
   validateMetadata,
   validateParts,
 } from "../src/index.js";
 
 const ORIGIN = "https://backup.invalid";
 const TOKEN = "test-only-backup-token-0123456789-ABCDEFGHX";
-const PART_BYTES = 8 * 1024 * 1024;
+const {
+  createJsonBytes: CREATE_JSON_BYTES,
+  completeJsonBytes: COMPLETE_JSON_BYTES,
+  partBytes: PART_BYTES,
+  maxParts: MAX_PARTS,
+  maxBackupBytes: MAX_BACKUP_BYTES,
+} = MULTIPART_LIMITS;
 
 const BASE_METADATA = Object.freeze({
   format: "presence-monitor-sqlite-backup/v1",
@@ -322,6 +329,12 @@ test("validateMetadata derives a canonical content-addressed key", () => {
 });
 
 test("metadata validation rejects malformed instances, tiers, timestamps, sizes, digests, and fields", () => {
+  assert.equal(MAX_BACKUP_BYTES, 64 * 1024 ** 3);
+  assert.doesNotThrow(() => validateMetadata(metadata({
+    database_bytes: MAX_BACKUP_BYTES,
+    gzip_bytes: MAX_BACKUP_BYTES,
+  })));
+
   const invalid = [
     metadata({ instance_id: "../production" }),
     metadata({ instance_id: "Production" }),
@@ -329,7 +342,8 @@ test("metadata validation rejects malformed instances, tiers, timestamps, sizes,
     metadata({ created_at: "2026-02-30T16:00:00.000000+00:00" }),
     metadata({ created_at: "2026-08-27T16:00:00Z" }),
     metadata({ gzip_bytes: 0 }),
-    metadata({ gzip_bytes: PART_BYTES * 10_000 + 1 }),
+    metadata({ database_bytes: MAX_BACKUP_BYTES + 1 }),
+    metadata({ gzip_bytes: MAX_BACKUP_BYTES + 1 }),
     metadata({ database_sha256: "A".repeat(64) }),
     metadata({ gzip_sha256: "not-a-digest" }),
     metadata({ schema_version: 0 }),
@@ -371,7 +385,7 @@ test("JSON routes reject unsupported media types, oversized bodies, and invalid 
   assert.equal(unsupported.status, 415);
 
   const oversized = await worker.fetch(
-    jsonRequest("/v1/uploads", `{"padding":"${"x".repeat(33 * 1024)}"}`),
+    jsonRequest("/v1/uploads", `{"padding":"${"x".repeat(CREATE_JSON_BYTES)}"}`),
     env,
   );
   assert.equal(oversized.status, 413);
@@ -481,6 +495,56 @@ test("validateParts accepts only sorted, unique, bounded R2 part descriptors", (
   for (const value of invalid) {
     assert.throws(() => validateParts(value));
   }
+
+  const maximum = Array.from({ length: MAX_PARTS }, (_value, index) => ({
+    part_number: index + 1,
+    etag: "a".repeat(256),
+  }));
+  const normalized = validateParts({ parts: maximum });
+  assert.equal(normalized.length, MAX_PARTS);
+  assert.deepEqual(normalized.at(-1), {
+    partNumber: MAX_PARTS,
+    etag: "a".repeat(256),
+  });
+  assert.throws(() => validateParts({
+    parts: [
+      ...maximum,
+      { part_number: MAX_PARTS + 1, etag: "a".repeat(256) },
+    ],
+  }));
+});
+
+test("completion request bound admits the maximum legal part list and rejects larger inputs", async () => {
+  const env = environment();
+  const path = `/v1/uploads/missing-upload/complete?key=${encodeURIComponent(EXPECTED_KEY)}`;
+  const maximum = Array.from({ length: MAX_PARTS }, (_value, index) => ({
+    part_number: index + 1,
+    etag: "a".repeat(256),
+  }));
+  const serialized = JSON.stringify({ parts: maximum });
+  const serializedBytes = new TextEncoder().encode(serialized).byteLength;
+  assert.ok(serializedBytes > CREATE_JSON_BYTES);
+  assert.ok(serializedBytes <= COMPLETE_JSON_BYTES);
+
+  const accepted = await worker.fetch(jsonRequest(path, serialized), env);
+  assert.equal(accepted.status, 404);
+
+  const tooMany = await worker.fetch(
+    jsonRequest(path, {
+      parts: [
+        ...maximum,
+        { part_number: MAX_PARTS + 1, etag: "a".repeat(256) },
+      ],
+    }),
+    env,
+  );
+  assert.equal(tooMany.status, 400);
+
+  const oversized = await worker.fetch(
+    jsonRequest(path, `{"parts":[],"padding":"${"x".repeat(COMPLETE_JSON_BYTES)}"}`),
+    env,
+  );
+  assert.equal(oversized.status, 413);
 });
 
 test("multipart completion creates an immutable object and is idempotent", async () => {
@@ -767,6 +831,23 @@ test("toolchain, binding, lifecycle, and append-only source policy stay pinned",
       { enabled: true, prefix: "backups/production/hourly/", maxAge: 8 * 86_400, type: "Age" },
       { enabled: true, prefix: "backups/production/daily/", maxAge: 93 * 86_400, type: "Age" },
       { enabled: true, prefix: "backups/production/monthly/", maxAge: 400 * 86_400, type: "Age" },
+    ],
+  );
+
+  const bucketLock = JSON.parse(
+    readFileSync(new URL("../bucket-lock.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(
+    bucketLock.rules.map((rule) => ({
+      enabled: rule.enabled,
+      prefix: rule.prefix,
+      maxAgeSeconds: rule.condition.maxAgeSeconds,
+      type: rule.condition.type,
+    })),
+    [
+      { enabled: true, prefix: "backups/production/hourly/", maxAgeSeconds: 8 * 86_400, type: "Age" },
+      { enabled: true, prefix: "backups/production/daily/", maxAgeSeconds: 93 * 86_400, type: "Age" },
+      { enabled: true, prefix: "backups/production/monthly/", maxAgeSeconds: 400 * 86_400, type: "Age" },
     ],
   );
 

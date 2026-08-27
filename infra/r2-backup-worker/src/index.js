@@ -1,11 +1,35 @@
 const BACKUP_FORMAT = "presence-monitor-sqlite-backup/v1";
-const JSON_BYTES = 32 * 1024;
-const PART_BYTES = 8 * 1024 * 1024;
-const MAX_PARTS = 10_000;
-const MAX_GZIP_BYTES = PART_BYTES * MAX_PARTS;
-const MAX_DATABASE_BYTES = 5 * 1024 ** 4;
+export const MULTIPART_LIMITS = Object.freeze({
+  createJsonBytes: 32 * 1024,
+  completeJsonBytes: 4 * 1024 * 1024,
+  partBytes: 8 * 1024 * 1024,
+  maxParts: 10_000,
+  maxBackupBytes: 64 * 1024 ** 3,
+});
+const {
+  createJsonBytes: CREATE_JSON_BYTES,
+  completeJsonBytes: COMPLETE_JSON_BYTES,
+  partBytes: PART_BYTES,
+  maxParts: MAX_PARTS,
+  maxBackupBytes: MAX_BACKUP_BYTES,
+} = MULTIPART_LIMITS;
+const MAX_GZIP_BYTES = MAX_BACKUP_BYTES;
+const MAX_DATABASE_BYTES = MAX_BACKUP_BYTES;
 const MAX_AUTHORIZATION_BYTES = 512;
 const MIN_TOKEN_CHARACTERS = 43;
+const MAX_ETAG_CHARACTERS = 256;
+const MAX_PART_DESCRIPTOR_JSON_BYTES =
+  '{"part_number":,"etag":""}'.length + String(MAX_PARTS).length + MAX_ETAG_CHARACTERS;
+const MAX_COMPLETE_PAYLOAD_BYTES =
+  '{"parts":[]}'.length +
+  (MAX_PART_DESCRIPTOR_JSON_BYTES * MAX_PARTS) +
+  (MAX_PARTS - 1);
+if (
+  MAX_BACKUP_BYTES > PART_BYTES * MAX_PARTS ||
+  COMPLETE_JSON_BYTES < MAX_COMPLETE_PAYLOAD_BYTES
+) {
+  throw new Error("invalid multipart capacity limits");
+}
 const TIERS = new Set(["hourly", "daily", "monthly"]);
 const METADATA_FIELDS = Object.freeze([
   "format",
@@ -22,7 +46,7 @@ const METADATA_FIELD_SET = new Set(METADATA_FIELDS);
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const INSTANCE_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const UPLOAD_ID_PATTERN = /^[A-Za-z0-9._~+/=-]{1,1024}$/;
-const ETAG_PATTERN = /^[A-Za-z0-9._~:+/=-]{1,256}$/;
+const ETAG_PATTERN = new RegExp(`^[A-Za-z0-9._~:+/=-]{1,${MAX_ETAG_CHARACTERS}}$`);
 const KEY_PATTERN = new RegExp(
   "^backups/" +
     "([a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?)/" +
@@ -257,7 +281,7 @@ export async function authorize(request, configuredToken) {
   );
 }
 
-async function readJson(request) {
+async function readJson(request, maximumBytes) {
   const contentType = request.headers.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;.*)?$/i.test(contentType)) {
     throw new HttpError(415);
@@ -265,7 +289,7 @@ async function readJson(request) {
   const declared = request.headers.get("content-length");
   if (declared !== null) {
     if (!/^\d+$/.test(declared)) throw new HttpError(400);
-    if (Number(declared) > JSON_BYTES) throw new HttpError(413);
+    if (Number(declared) > maximumBytes) throw new HttpError(413);
   }
   if (!request.body) throw new HttpError(400);
 
@@ -277,7 +301,7 @@ async function readJson(request) {
     if (done) break;
     const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
     bytes += chunk.byteLength;
-    if (bytes > JSON_BYTES) {
+    if (bytes > maximumBytes) {
       await reader.cancel().catch(() => undefined);
       throw new HttpError(413);
     }
@@ -427,7 +451,7 @@ function multipartErrorStatus(error) {
 }
 
 async function createUpload(request, env) {
-  const { key, metadata } = validateMetadata(await readJson(request));
+  const { key, metadata } = validateMetadata(await readJson(request, CREATE_JSON_BYTES));
   const existing = await env.BACKUPS.head(key);
   if (existing) {
     if (!objectMatchesMetadata(existing, key, metadata)) throw new HttpError(409);
@@ -488,7 +512,7 @@ async function completeUpload(request, env, url, encodedUploadId) {
   const uploadId = validateUploadId(encodedUploadId);
   const { key } = requireOnlyQuery(url, ["key"]);
   validateKey(key);
-  const parts = validateParts(await readJson(request));
+  const parts = validateParts(await readJson(request, COMPLETE_JSON_BYTES));
 
   const existing = await env.BACKUPS.head(key);
   if (existing) {

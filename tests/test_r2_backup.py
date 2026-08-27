@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -10,8 +11,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from scripts.backup_format import create_artifact
+from scripts.backup_format import BackupArtifact, create_artifact
 from scripts.r2_backup import (
+    MAX_COMPLETE_JSON_BYTES,
+    MAX_GZIP_BYTES,
+    MAX_PART_BYTES,
+    MAX_PARTS,
     PermanentBackupError,
     R2BackupClient,
     offsite_backup_healthy,
@@ -285,6 +290,83 @@ class R2BackupTests(unittest.TestCase):
                 [number for number, _size in gateway.state.parts],
                 list(range(1, len(gateway.state.parts) + 1)),
             )
+
+    def test_client_rejects_oversized_archives_and_excess_part_counts_before_network(self):
+        self.assertEqual(MAX_GZIP_BYTES, 64 * 1024**3)
+        self.assertEqual(MAX_PARTS, 10_000)
+        self.assertEqual(MAX_PART_BYTES, 8 * 1024 * 1024)
+
+        with tempfile.TemporaryDirectory() as directory, FakeGateway() as gateway:
+            root = Path(directory)
+            base = self._artifact(root)
+            oversized = BackupArtifact(
+                archive=base.archive,
+                manifest=base.manifest,
+                metadata={**base.metadata, "gzip_bytes": MAX_GZIP_BYTES + 1},
+            )
+            client = R2BackupClient(gateway.url, self._token(root))
+            with self.assertRaisesRegex(PermanentBackupError, "gzip_bytes"):
+                client.upload(oversized, instance_id="test", tier="hourly")
+            self.assertFalse(gateway.state.requests)
+
+            archive = root / "too-many-parts.sqlite3.gz"
+            payload = b"x" * (MAX_PARTS + 1)
+            archive.write_bytes(payload)
+            too_many = BackupArtifact(
+                archive=archive,
+                manifest=base.manifest,
+                metadata={
+                    **base.metadata,
+                    "gzip_bytes": len(payload),
+                    "gzip_sha256": hashlib.sha256(payload).hexdigest(),
+                },
+            )
+            tiny_parts = R2BackupClient(gateway.url, self._token(root), part_bytes=1)
+            with self.assertRaisesRegex(PermanentBackupError, "10,000 parts"):
+                tiny_parts.upload(too_many, instance_id="test", tier="hourly")
+            self.assertFalse(gateway.state.requests)
+
+            bounded = R2BackupClient(
+                gateway.url,
+                self._token(root),
+                part_bytes=MAX_PART_BYTES + 1,
+            )
+            self.assertEqual(bounded.part_bytes, MAX_PART_BYTES)
+
+    def test_client_completion_json_bound_accepts_maximum_part_list_and_rejects_oversize(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = R2BackupClient("http://127.0.0.1:1", self._token(root))
+            captured: list[bytes] = []
+
+            def capture(_method, _path, **options):
+                captured.append(options["data"])
+                return {}
+
+            client._execute = capture  # type: ignore[method-assign]
+            maximum = {
+                "parts": [
+                    {"part_number": number, "etag": "a" * 256}
+                    for number in range(1, MAX_PARTS + 1)
+                ]
+            }
+            client._json_request(
+                "POST",
+                "/v1/uploads/upload/complete",
+                payload=maximum,
+                max_request_bytes=MAX_COMPLETE_JSON_BYTES,
+            )
+            self.assertEqual(len(captured), 1)
+            self.assertLessEqual(len(captured[0]), MAX_COMPLETE_JSON_BYTES)
+
+            with self.assertRaisesRegex(PermanentBackupError, "request is too large"):
+                client._json_request(
+                    "POST",
+                    "/v1/uploads/upload/complete",
+                    payload={"padding": "x" * MAX_COMPLETE_JSON_BYTES},
+                    max_request_bytes=MAX_COMPLETE_JSON_BYTES,
+                )
+            self.assertEqual(len(captured), 1)
 
     def test_retry_honors_429_but_permanent_403_is_not_retried(self):
         with tempfile.TemporaryDirectory() as directory, FakeGateway() as gateway:
