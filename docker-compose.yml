@@ -11,6 +11,9 @@ services:
       BOOTSTRAP_TOKEN_FILE: /run/secrets/bootstrap_token
       COOKIE_SECURE: always
       TRUST_PROXY_HEADERS: "1"
+      MAX_IMPORT_BYTES: "${MAX_IMPORT_BYTES:-33554432}"
+      MAX_IMPORT_EXPANDED_BYTES: "${MAX_IMPORT_EXPANDED_BYTES:-67108864}"
+      MAX_SOURCE_EXPANDED_BYTES: "${MAX_SOURCE_EXPANDED_BYTES:-268435456}"
     secrets:
       - bootstrap_token
     volumes:

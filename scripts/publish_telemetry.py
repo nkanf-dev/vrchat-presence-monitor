@@ -9,6 +9,7 @@ import io
 import json
 import os
 import random
+import re
 import socket
 import tempfile
 import time
@@ -22,6 +23,7 @@ from typing import Any, Callable
 PageFetcher = Callable[[int, int], dict[str, Any]]
 EVENT_CHUNK_SIZE = 1_000
 MAX_LOCAL_EXPORT_BYTES = 64 * 1024 * 1024
+MIGRATED_EVENT_ID_PATTERN = re.compile(r"^legacy_event_([0-9]+)_[0-9a-f]{64}$")
 LEGACY_EVENT_FIELDS = (
     "friend_id",
     "occurred_at",
@@ -144,9 +146,18 @@ def collect_events(fetch_page: PageFetcher, cursor: int) -> list[dict[str, Any]]
 
 def normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     supplied_id = str(event.get("client_event_id") or "").strip()
-    client_event_id = supplied_id or f"local-{int(event['id'])}"
+    row_id = str(event.get("id") if event.get("id") is not None else "")
+    previous_id = f"local-{row_id}" if row_id.isdigit() else ""
+    client_event_id = supplied_id or previous_id
+    if not client_event_id:
+        raise ValueError("历史记录缺少稳定 ID")
+    migrated_match = MIGRATED_EVENT_ID_PATTERN.fullmatch(supplied_id)
+    has_bound_legacy_alias = bool(
+        migrated_match and previous_id and migrated_match.group(1) == row_id
+    )
     return {
         "client_event_id": client_event_id,
+        "previous_event_ids": [previous_id] if has_bound_legacy_alias else [],
         "friend_id": str(event.get("friend_id") or ""),
         "occurred_at": str(event.get("occurred_at") or ""),
         "old_status": str(event.get("old_status") or "unknown"),

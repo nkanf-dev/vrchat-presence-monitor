@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import logging
 import secrets
@@ -41,12 +43,25 @@ from .security import (
     set_browser_cookie,
 )
 from .settings import Settings
-from .storage import Store
+from .storage import BACKUP_COMPRESSION_MARGIN, Store
 
 
 LOGGER = logging.getLogger("presence_monitor.hosted")
 Model = TypeVar("Model", bound=BaseModel)
 Result = TypeVar("Result")
+
+
+class _DuplicateBackupKey(ValueError):
+    pass
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateBackupKey(key)
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -80,10 +95,25 @@ async def _read_model(request: Request, model: Type[Model], maximum: int) -> Mod
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid request") from error
 
 
-def _decode_backup(raw: bytes) -> dict[str, Any]:
+def _decode_backup(raw: bytes, maximum_expanded: int) -> dict[str, Any]:
     """Decode and validate the top-level backup object in a worker thread."""
+    if raw.startswith(b"\x1f\x8b"):
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as archive:
+                decoded = archive.read(maximum_expanded + 1)
+        except (EOFError, OSError) as error:
+            raise ValueError("压缩备份文件已损坏") from error
+        if len(decoded) > maximum_expanded:
+            raise ValueError("备份解压后过大")
+    else:
+        decoded = raw
     try:
-        payload = json.loads(raw.decode("utf-8"))
+        payload = json.loads(
+            decoded.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+        )
+    except _DuplicateBackupKey as error:
+        raise ValueError("备份文件包含重复字段") from error
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise ValueError("备份文件不是有效 JSON") from error
     if not isinstance(payload, dict):
@@ -98,6 +128,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         str(config.data_dir / "hosted.sqlite3"),
         friend_limit=config.tenant_friend_limit,
         event_limit=config.tenant_event_limit,
+        max_backup_bytes=config.max_import_bytes,
     )
     limiter = LoginRateLimiter(config.login_attempts, config.login_window_seconds)
     collector_limiter = RequestRateLimiter(config.collector_requests_per_minute, 60)
@@ -335,14 +366,46 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     ) -> dict[str, Any]:
         return database.data(auth.row["tenant_id"], limit)
 
+    @app.get("/v1/capabilities")
+    def capabilities(_: Authenticated = Depends(viewer)) -> dict[str, int]:
+        return {
+            "max_import_bytes": config.max_import_bytes,
+            "max_import_expanded_bytes": config.max_import_expanded_bytes,
+            "max_source_expanded_bytes": config.max_source_expanded_bytes,
+        }
+
     @app.get("/v1/export.json")
     def export_json(auth: Authenticated = Depends(viewer)) -> Response:
         payload = database.export_json(auth.row["tenant_id"])
         filename = f"presence-monitor-backup-{time.strftime('%Y-%m-%d', time.gmtime())}.json"
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) <= config.max_import_bytes:
+            return Response(
+                content=encoded,
+                media_type="application/json",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        if len(encoded) > config.max_import_expanded_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "当前数据超过服务器直接恢复上限；请使用部署者的 SQLite/R2 备份，"
+                    "或提高 MAX_IMPORT_EXPANDED_BYTES 后从直连端点导出"
+                ),
+            )
+        compressed = gzip.compress(encoded, compresslevel=9, mtime=0)
+        if len(compressed) > config.max_import_bytes - BACKUP_COMPRESSION_MARGIN:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "压缩备份仍超过上传上限；请使用部署者的 SQLite/R2 备份，"
+                    "或提高容量后从直连端点导出"
+                ),
+            )
         return Response(
-            content=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            content=compressed,
+            media_type="application/gzip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.gz"'},
         )
 
     @app.post("/v1/import.json")
@@ -359,7 +422,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             )
         raw = await _read_bytes(request, config.max_import_bytes)
         try:
-            payload = await run_in_threadpool(_decode_backup, raw)
+            payload = await run_in_threadpool(
+                _decode_backup,
+                raw,
+                config.max_import_expanded_bytes,
+            )
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
         try:

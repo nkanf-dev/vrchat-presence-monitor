@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gzip
 import json
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -35,10 +37,14 @@ class HostedHttpContractTests(unittest.TestCase):
             login_attempts=3,
             login_window_seconds=300,
             max_import_bytes=1024 * 1024,
+            max_import_expanded_bytes=2 * 1024 * 1024,
             import_requests=2,
             import_window_seconds=60,
         )
-        self.store = Store(str(self.settings.data_dir / "hosted.sqlite3"))
+        self.store = Store(
+            str(self.settings.data_dir / "hosted.sqlite3"),
+            max_backup_bytes=self.settings.max_import_bytes,
+        )
         self.client = TestClient(create_app(self.settings, self.store))
         response = self.client.post(
             "/v1/bootstrap",
@@ -105,6 +111,20 @@ class HostedHttpContractTests(unittest.TestCase):
 
         self.assertEqual(logout.status_code, 200)
         self.assertEqual(self.client.get("/v1/me").status_code, 401)
+
+    def test_authenticated_capabilities_report_the_actual_import_limits(self):
+        self.assertEqual(self.client.get("/v1/capabilities").status_code, 401)
+        self.assertEqual(self.login().status_code, 200)
+        response = self.client.get("/v1/capabilities")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "max_import_bytes": self.settings.max_import_bytes,
+                "max_import_expanded_bytes": self.settings.max_import_expanded_bytes,
+                "max_source_expanded_bytes": self.settings.max_source_expanded_bytes,
+            },
+        )
 
     def test_legacy_viewer_bearer_is_adopted_once_into_cookie(self):
         session = self.store.exchange_access_code(self.bootstrap["access_code"])
@@ -335,6 +355,159 @@ class HostedHttpContractTests(unittest.TestCase):
         limited = self.client.post("/v1/import.json", headers=request_headers, json=payload)
         self.assertEqual(limited.status_code, 429)
         self.assertEqual(limited.headers["retry-after"], "60")
+
+    def test_import_accepts_gzip_local_v2_backup_and_rejects_corruption(self):
+        self.assertEqual(self.login().status_code, 200)
+        payload = {
+            "format": "vrchat-monitor-backup",
+            "version": 2,
+            "friends": [
+                {
+                    "id": "usr_1",
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "status": "active",
+                    "updated_at": "2026-08-27T12:00:00+00:00",
+                }
+            ],
+            "status_events": [
+                {
+                    "client_event_id": "event_0123456789abcdef0123456789abcdef",
+                    "friend_id": "usr_1",
+                    "occurred_at": "2026-08-27T12:00:00+00:00",
+                    "old_status": "offline",
+                    "new_status": "active",
+                }
+            ],
+            "sync_runs": [],
+            "raw_fetches": [{"body_b64": "ignored-by-hosted-import"}],
+        }
+        headers = {
+            "Origin": "http://testserver",
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "application/gzip",
+        }
+        response = self.client.post(
+            "/v1/import.json",
+            headers=headers,
+            content=gzip.compress(json.dumps(payload).encode("utf-8")),
+        )
+        corrupt = self.client.post(
+            "/v1/import.json",
+            headers=headers,
+            content=b"\x1f\x8bbroken",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["imported"], {"friends": 1, "events": 1, "changed": 0})
+        self.assertEqual(corrupt.status_code, 400)
+
+    def test_direct_import_rejects_duplicate_json_fields(self):
+        self.assertEqual(self.login().status_code, 200)
+        response = self.client.post(
+            "/v1/import.json",
+            headers={
+                "Origin": "http://testserver",
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "application/json",
+            },
+            content=(
+                b'{"format":"vrchat-monitor-backup","version":2,'
+                b'"friends":[],"friends":[],"status_events":[]}'
+            ),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("重复字段", response.text)
+
+    def test_export_is_within_the_same_limit_used_for_plain_and_gzip_restore(self):
+        self.assertEqual(self.login().status_code, 200)
+        exported = self.client.get("/v1/export.json")
+        headers = {
+            "Origin": "http://testserver",
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "application/json",
+        }
+        restored = self.client.post(
+            "/v1/import.json",
+            headers=headers,
+            content=exported.content,
+        )
+        oversized = gzip.compress(
+            json.dumps(
+                {
+                    "format": "vrchat-monitor-hosted-backup",
+                    "version": 2,
+                    "friends": [],
+                    "status_events": [],
+                    "padding": "x" * self.settings.max_import_expanded_bytes,
+                }
+            ).encode("utf-8")
+        )
+        rejected = self.client.post(
+            "/v1/import.json",
+            headers={**headers, "Content-Type": "application/gzip"},
+            content=oversized,
+        )
+
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertLessEqual(len(exported.content), self.settings.max_import_bytes)
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertIn("解压后过大", rejected.text)
+
+    def test_old_over_limit_database_starts_and_round_trips_through_gzip_export(self):
+        collector = self.store.auth(self.bootstrap["collector_token"], "collector")
+        assert collector is not None
+        self.store.ingest(
+            collector["tenant_id"],
+            collector["id"],
+            [{"id": "usr_large", "displayName": "Large", "bio": "x" * 8192}],
+            [],
+        )
+        low_settings = replace(
+            self.settings,
+            max_import_bytes=1024,
+            max_import_expanded_bytes=64 * 1024,
+        )
+        reopened = Store(
+            str(self.settings.data_dir / "hosted.sqlite3"),
+            max_backup_bytes=low_settings.max_import_bytes,
+        )
+        target = reopened.bootstrap("Restore target", "bridge")
+        with TestClient(create_app(low_settings, reopened)) as client:
+            login_headers = {
+                "Origin": "http://testserver",
+                "Sec-Fetch-Site": "same-origin",
+            }
+            self.assertEqual(
+                client.post(
+                    "/v1/login",
+                    headers=login_headers,
+                    json={"access_code": self.bootstrap["access_code"]},
+                ).status_code,
+                200,
+            )
+            exported = client.get("/v1/export.json")
+            self.assertEqual(exported.status_code, 200, exported.text)
+            self.assertEqual(exported.headers["content-type"], "application/gzip")
+            self.assertLessEqual(len(exported.content), low_settings.max_import_bytes)
+            decoded = json.loads(gzip.decompress(exported.content))
+            self.assertEqual(decoded["friends"][0]["id"], "usr_large")
+
+            self.assertEqual(
+                client.post(
+                    "/v1/login",
+                    headers=login_headers,
+                    json={"access_code": target["access_code"]},
+                ).status_code,
+                200,
+            )
+            restored = client.post(
+                "/v1/import.json",
+                headers={**login_headers, "Content-Type": "application/gzip"},
+                content=exported.content,
+            )
+            self.assertEqual(restored.status_code, 200, restored.text)
+            self.assertEqual(restored.json()["imported"]["friends"], 1)
 
     def test_login_rejects_vrchat_password_fields(self):
         response = self.client.post(

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from server.settings import Settings
+from server.settings import DEFAULT_MAX_IMPORT_BYTES, Settings
 
 
 class HostedSettingsTests(unittest.TestCase):
@@ -47,6 +47,42 @@ class HostedSettingsTests(unittest.TestCase):
                 static_dir=Path("/tmp"),
                 bootstrap_token="secret",
                 import_requests=0,
+            )
+
+    def test_import_capacity_matches_cloudflare_and_has_a_separate_expanded_limit(self):
+        with patch.dict(os.environ, {"BOOTSTRAP_TOKEN": "secret"}, clear=True):
+            defaults = Settings.from_env()
+        self.assertEqual(defaults.max_import_bytes, DEFAULT_MAX_IMPORT_BYTES)
+        self.assertGreater(
+            defaults.max_import_expanded_bytes,
+            defaults.max_import_bytes,
+        )
+        self.assertGreater(
+            defaults.max_source_expanded_bytes,
+            defaults.max_import_expanded_bytes,
+        )
+
+        with self.assertRaisesRegex(ValueError, "MAX_IMPORT_BYTES"):
+            Settings(
+                data_dir=Path("/tmp"),
+                static_dir=Path("/tmp"),
+                bootstrap_token="secret",
+                max_import_bytes=91 * 1024 * 1024,
+            )
+        with self.assertRaisesRegex(ValueError, "MAX_IMPORT_EXPANDED_BYTES"):
+            Settings(
+                data_dir=Path("/tmp"),
+                static_dir=Path("/tmp"),
+                bootstrap_token="secret",
+                max_import_bytes=2 * 1024,
+                max_import_expanded_bytes=1024,
+            )
+        with self.assertRaisesRegex(ValueError, "MAX_SOURCE_EXPANDED_BYTES"):
+            Settings(
+                data_dir=Path("/tmp"),
+                static_dir=Path("/tmp"),
+                bootstrap_token="secret",
+                max_source_expanded_bytes=32 * 1024 * 1024,
             )
 
 

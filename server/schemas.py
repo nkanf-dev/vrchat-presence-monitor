@@ -23,6 +23,7 @@ class TelemetryModel(BaseModel):
 
 
 BoundedLink = Annotated[str, Field(max_length=2048)]
+BoundedLegacyEventId = Annotated[str, Field(pattern=r"^local-[0-9]+$", max_length=64)]
 
 
 class FriendTelemetry(TelemetryModel):
@@ -76,6 +77,7 @@ class EventTelemetry(TelemetryModel):
     location: str = Field(default="", max_length=1024)
     platform: str = Field(default="", max_length=80)
     source: str = Field(default="local-bridge", max_length=80)
+    previous_event_ids: list[BoundedLegacyEventId] = Field(default_factory=list, max_length=1)
 
 
 class TelemetryRequest(StrictModel):

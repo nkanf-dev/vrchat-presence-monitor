@@ -81,7 +81,25 @@ class TelemetryBridgeTests(unittest.TestCase):
             "occurred_at": "2026-08-27T12:00:00+00:00",
             "new_status": "active",
         }
-        self.assertEqual(normalize_event(event)["client_event_id"], "local-42")
+        normalized = normalize_event(event)
+        self.assertEqual(normalized["client_event_id"], "local-42")
+        self.assertEqual(normalized["previous_event_ids"], [])
+
+        migrated_id = f"legacy_event_42_{'a' * 64}"
+        migrated = normalize_event(
+            {**event, "client_event_id": migrated_id}
+        )
+        self.assertEqual(migrated["client_event_id"], migrated_id)
+        self.assertEqual(migrated["previous_event_ids"], ["local-42"])
+
+        unrelated = normalize_event(
+            {**event, "client_event_id": f"legacy_event_41_{'b' * 64}"}
+        )
+        generated = normalize_event(
+            {**event, "client_event_id": "event_0123456789abcdef0123456789abcdef"}
+        )
+        self.assertEqual(unrelated["previous_event_ids"], [])
+        self.assertEqual(generated["previous_event_ids"], [])
 
     def test_bridge_state_is_private_and_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:

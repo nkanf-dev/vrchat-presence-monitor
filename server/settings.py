@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_MAX_IMPORT_BYTES = 32 * 1024 * 1024
+MAX_CLOUDFLARE_IMPORT_BYTES = 90 * 1024 * 1024
+DEFAULT_MAX_IMPORT_EXPANDED_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_SOURCE_EXPANDED_BYTES = 256 * 1024 * 1024
+
+
 def _boolean(value: str, default: bool = False) -> bool:
     normalized = str(value or "").strip().lower()
     if not normalized:
@@ -39,7 +45,9 @@ class Settings:
     session_days: int = 30
     login_attempts: int = 8
     login_window_seconds: int = 300
-    max_import_bytes: int = 64 * 1024 * 1024
+    max_import_bytes: int = DEFAULT_MAX_IMPORT_BYTES
+    max_import_expanded_bytes: int = DEFAULT_MAX_IMPORT_EXPANDED_BYTES
+    max_source_expanded_bytes: int = DEFAULT_MAX_SOURCE_EXPANDED_BYTES
     import_requests: int = 4
     import_window_seconds: int = 600
     max_telemetry_bytes: int = 4 * 1024 * 1024
@@ -58,8 +66,12 @@ class Settings:
             raise ValueError("LOGIN_ATTEMPTS must be between 1 and 100")
         if not 10 <= self.login_window_seconds <= 3600:
             raise ValueError("LOGIN_WINDOW_SECONDS must be between 10 and 3600")
-        if not 1024 <= self.max_import_bytes <= 256 * 1024 * 1024:
+        if not 1024 <= self.max_import_bytes <= MAX_CLOUDFLARE_IMPORT_BYTES:
             raise ValueError("MAX_IMPORT_BYTES is outside the supported range")
+        if not self.max_import_bytes <= self.max_import_expanded_bytes <= 512 * 1024 * 1024:
+            raise ValueError("MAX_IMPORT_EXPANDED_BYTES is outside the supported range")
+        if not self.max_import_expanded_bytes <= self.max_source_expanded_bytes <= 512 * 1024 * 1024:
+            raise ValueError("MAX_SOURCE_EXPANDED_BYTES is outside the supported range")
         if not 1 <= self.import_requests <= 100:
             raise ValueError("IMPORT_REQUESTS must be between 1 and 100")
         if not 10 <= self.import_window_seconds <= 3600:
@@ -85,7 +97,19 @@ class Settings:
             session_days=int(os.environ.get("SESSION_DAYS", "30")),
             login_attempts=int(os.environ.get("LOGIN_ATTEMPTS", "8")),
             login_window_seconds=int(os.environ.get("LOGIN_WINDOW_SECONDS", "300")),
-            max_import_bytes=int(os.environ.get("MAX_IMPORT_BYTES", str(64 * 1024 * 1024))),
+            max_import_bytes=int(os.environ.get("MAX_IMPORT_BYTES", str(DEFAULT_MAX_IMPORT_BYTES))),
+            max_import_expanded_bytes=int(
+                os.environ.get(
+                    "MAX_IMPORT_EXPANDED_BYTES",
+                    str(DEFAULT_MAX_IMPORT_EXPANDED_BYTES),
+                )
+            ),
+            max_source_expanded_bytes=int(
+                os.environ.get(
+                    "MAX_SOURCE_EXPANDED_BYTES",
+                    str(DEFAULT_MAX_SOURCE_EXPANDED_BYTES),
+                )
+            ),
             import_requests=int(os.environ.get("IMPORT_REQUESTS", "4")),
             import_window_seconds=int(os.environ.get("IMPORT_WINDOW_SECONDS", "600")),
             max_telemetry_bytes=int(os.environ.get("MAX_TELEMETRY_BYTES", str(4 * 1024 * 1024))),
