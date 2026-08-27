@@ -93,12 +93,16 @@ class FakeGateway:
                     f"{stamp}-{metadata['gzip_sha256']}.sqlite3.gz"
                 )
 
+            @staticmethod
+            def _header_value(value: object) -> str:
+                return str(value).replace("\r", "").replace("\n", "")
+
             def _object_headers(self, key: str, metadata: dict[str, object], size: int) -> None:
                 self.send_header("Content-Type", "application/gzip")
                 self.send_header("Content-Length", str(size))
-                self.send_header("X-Backup-Key", key)
+                self.send_header("X-Backup-Key", self._header_value(key))
                 for field, header in HEADER_FIELDS.items():
-                    self.send_header(header, str(metadata[field]))
+                    self.send_header(header, self._header_value(metadata[field]))
 
             def do_POST(self):
                 if self._record_or_fail():
