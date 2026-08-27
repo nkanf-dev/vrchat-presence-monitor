@@ -26,6 +26,12 @@ USER_AGENT = "PicoWorksVRChatMonitor/0.1 (contact: local@localhost)"
 WORLD_ID_PATTERN = re.compile(r"wrld_[0-9a-f-]{36}", re.IGNORECASE)
 
 
+def secure_tls_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
 def world_id_from_location(location: str | None) -> str | None:
     match = WORLD_ID_PATTERN.search(str(location or ""))
     return match.group(0) if match else None
@@ -351,7 +357,7 @@ class VRChatClient:
         for attempt in range(4):
             raw: socket.socket | None = None
             try:
-                context = ssl.create_default_context()
+                context = secure_tls_context()
                 proxy_url = self._proxy_url()
                 proxy = urllib.parse.urlsplit(proxy_url) if proxy_url else None
                 if proxy and proxy.scheme in {"http", "https"} and proxy.hostname:

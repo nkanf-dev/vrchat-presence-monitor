@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
 import secrets
 import threading
 import time
 import urllib.parse
-import urllib.request
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .http_assets import static_asset_for_request
 from .vrchat import CredentialStore, VRChatClient, VRChatError, event_to_friend, world_id_from_location
 
 
@@ -213,26 +212,6 @@ class Monitor:
             self._world_cache[normalized] = (time.monotonic(), result)
         return result
 
-    def world_image(self, url: str) -> tuple[bytes, str]:
-        parsed = urllib.parse.urlsplit(url)
-        host = (parsed.hostname or "").lower()
-        if parsed.scheme != "https" or not (host == "vrchat.cloud" or host.endswith(".vrchat.cloud")):
-            raise VRChatError("世界缩略图地址不受信任", 400)
-        request = urllib.request.Request(url, headers={"User-Agent": "PicoWorksVRChatMonitor/0.1", "Accept": "image/*"})
-        try:
-            with urllib.request.urlopen(request, timeout=15) as response:
-                raw = response.read(8 * 1024 * 1024 + 1)
-                if len(raw) > 8 * 1024 * 1024:
-                    raise VRChatError("世界缩略图过大", 413)
-                content_type = response.headers.get_content_type()
-                if not content_type.startswith("image/"):
-                    raise VRChatError("世界缩略图格式异常", 415)
-                return raw, content_type
-        except VRChatError:
-            raise
-        except Exception as error:
-            raise VRChatError(f"世界缩略图获取失败：{error}", 502) from error
-
     def state(self) -> dict[str, Any]:
         with self._lock:
             status = self._status
@@ -339,20 +318,6 @@ class Handler(BaseHTTPRequestHandler):
             except VRChatError as error:
                 self._json({"error": str(error), "status": error.status}, error.status or 400)
             return
-        if self.path.startswith("/api/world-image"):
-            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-            url = query.get("url", [""])[0]
-            try:
-                raw, content_type = monitor.world_image(url)
-                self.send_response(200)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(raw)))
-                self.send_header("Cache-Control", "public, max-age=86400, immutable")
-                self.end_headers()
-                self.wfile.write(raw)
-            except VRChatError as error:
-                self._json({"error": str(error), "status": error.status}, error.status or 502)
-            return
         if self.path.startswith("/api/world-presence"):
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             day = query.get("day", [None])[0]
@@ -429,21 +394,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"内部错误：{error}"}, 500)
 
     def _serve_static(self, request_path: str) -> None:
-        relative = request_path.split("?", 1)[0].lstrip("/") or "index.html"
-        relative = os.path.normpath(relative)
-        if relative.startswith(".."):
+        asset = static_asset_for_request(STATIC, request_path)
+        if asset is None:
             self.send_error(404)
             return
-        target = (STATIC / relative).resolve()
-        if STATIC not in target.parents and target != STATIC:
+        target, content_type = asset
+        try:
+            raw = target.read_bytes()
+        except (FileNotFoundError, IsADirectoryError, OSError):
             self.send_error(404)
             return
-        if not target.is_file():
-            self.send_error(404)
-            return
-        raw = target.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.end_headers()
