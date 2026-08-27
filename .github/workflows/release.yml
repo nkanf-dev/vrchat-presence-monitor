@@ -1,0 +1,391 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer without a v prefix or build metadata
+        required: true
+        type: string
+      prerelease:
+        description: Mark versions such as 1.0.0-rc.1 as a prerelease
+        required: true
+        default: false
+        type: boolean
+      publish:
+        description: Publish the GitHub release and GHCR image
+        required: true
+        default: false
+        type: boolean
+      confirmation:
+        description: To publish, enter RELEASE followed by the version (for example RELEASE 1.0.0)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: Build read-only candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Require main and validate release intent
+        env:
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          PUBLISH: ${{ inputs.publish }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          die() {
+            echo "$1" >&2
+            exit 1
+          }
+
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || die "releases must run from main"
+          (( ${#VERSION} <= 64 )) || die "version is longer than 64 characters"
+
+          identifier='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-${identifier}(\\.${identifier})*)?$"
+          [[ "$VERSION" =~ $semver ]] || die "version must be strict SemVer without v or build metadata"
+
+          expected_prerelease=false
+          if [[ "$VERSION" == *-* ]]; then
+            expected_prerelease=true
+          fi
+          [[ "$PRERELEASE" == "$expected_prerelease" ]] || die "prerelease input does not match the version suffix"
+
+          if [[ "$PUBLISH" == "true" ]]; then
+            [[ "$CONFIRMATION" == "RELEASE $VERSION" ]] || die "publish confirmation does not match the version"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            infra/r2-backup-worker/package-lock.json
+
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements-dev.txt
+          npm ci --prefix web --ignore-scripts --no-audit --no-fund
+          npm ci --prefix infra/r2-backup-worker --ignore-scripts --no-audit --no-fund
+
+      - name: Verify source candidate
+        run: |
+          python scripts/check_commit_messages.py HEAD
+          npm --prefix web run check
+          npm --prefix web test
+          npm --prefix web run build
+          npm --prefix infra/r2-backup-worker run check
+          npm --prefix infra/r2-backup-worker test
+          python -m unittest discover -s tests -v
+          python -m compileall -q server scripts vrchat_monitor
+          python -c "import pathlib, plistlib; [plistlib.loads(path.read_bytes()) for path in pathlib.Path('ops').glob('*.plist.template')]"
+          docker compose config --quiet
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build container candidate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        with:
+          context: .
+          github-token: ""
+          load: true
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          tags: presence-monitor:candidate
+          labels: |
+            org.opencontainers.image.created=1970-01-01T00:00:00Z
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan candidate for fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: presence-monitor:candidate
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL
+          ignore-unfixed: "true"
+          exit-code: "1"
+          format: table
+
+      - name: Assemble source archive
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --prefix="presence-monitor-$VERSION/" -o "presence-monitor-$VERSION.tar.gz" HEAD
+          docker image inspect presence-monitor:candidate --format '{{.Id}}' > "presence-monitor-$VERSION.image-id"
+          sha256sum \
+            "presence-monitor-$VERSION.tar.gz" \
+            "presence-monitor-$VERSION.image-id" \
+            > "presence-monitor-$VERSION.sha256"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: presence-monitor-${{ inputs.version }}
+          path: |
+            presence-monitor-${{ inputs.version }}.tar.gz
+            presence-monitor-${{ inputs.version }}.image-id
+            presence-monitor-${{ inputs.version }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish verified candidate
+    if: ${{ inputs.publish }}
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: presence-monitor-${{ inputs.version }}
+
+      - name: Verify candidate archive
+        env:
+          VERSION: ${{ inputs.version }}
+        run: sha256sum --check --strict "presence-monitor-$VERSION.sha256"
+
+      - name: Prepare immutable image reference
+        id: refs
+        run: |
+          repository_lower="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/$repository_lower" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse existing tag, release, or container version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repository="${GITHUB_REPOSITORY#*/}"
+          state="$(
+            gh api graphql \
+              -f query='query($owner:String!,$repository:String!,$qualifiedTag:String!,$releaseTag:String!){repository(owner:$owner,name:$repository){ref(qualifiedName:$qualifiedTag){name} release(tagName:$releaseTag){tagName}}}' \
+              -f owner="$owner" \
+              -f repository="$repository" \
+              -f qualifiedTag="refs/tags/v$VERSION" \
+              -f releaseTag="v$VERSION" \
+              --jq '[.data.repository.ref != null, .data.repository.release != null] | map(tostring) | @tsv'
+          )"
+          read -r tag_exists release_exists <<< "$state"
+          if [[ "$tag_exists" != "false" || "$release_exists" != "false" ]]; then
+            echo "v$VERSION already exists; published versions are never overwritten" >&2
+            exit 1
+          fi
+
+          owner_type="$(gh api "repos/$GITHUB_REPOSITORY" --jq .owner.type)"
+          package_name="$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')"
+          case "$owner_type" in
+            Organization) package_endpoint="orgs/$owner/packages/container/$package_name/versions" ;;
+            User) package_endpoint="users/$owner/packages/container/$package_name/versions" ;;
+            *)
+              echo "unsupported repository owner type: $owner_type" >&2
+              exit 1
+              ;;
+          esac
+
+          package_error="$(mktemp)"
+          cleanup() {
+            [[ ! -e "$package_error" ]] || unlink "$package_error"
+          }
+          trap cleanup EXIT
+          if package_tags="$(
+            gh api --paginate "$package_endpoint" \
+              --jq '.[] | .metadata.container.tags[]?' \
+              2>"$package_error"
+          )"; then
+            if grep -Fxq "$VERSION" <<< "$package_tags"; then
+              echo "$package_name:$VERSION already exists in GHCR; image tags are never overwritten" >&2
+              exit 1
+            fi
+          elif ! grep -Fq "HTTP 404" "$package_error"; then
+            cat "$package_error" >&2
+            echo "could not prove the GHCR version tag is unused" >&2
+            exit 1
+          fi
+
+      - name: Reserve version with an immutable annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag_object="$(
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+              -f tag="v$VERSION" \
+              -f message="Presence Monitor v$VERSION" \
+              -f object="$GITHUB_SHA" \
+              -f type=commit \
+              --jq .sha
+          )"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/v$VERSION" \
+            -f sha="$tag_object" \
+            --silent
+
+          tag_state="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --jq '[.object.type, .object.sha] | @tsv')"
+          read -r object_type object_sha <<< "$tag_state"
+          if [[ "$object_type" != "tag" ]]; then
+            echo "v$VERSION was not created as an annotated tag" >&2
+            exit 1
+          fi
+          target_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq .object.sha)"
+          if [[ "$target_sha" != "$GITHUB_SHA" ]]; then
+            echo "v$VERSION does not resolve to the workflow commit" >&2
+            exit 1
+          fi
+
+      - name: Attest candidate artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: presence-monitor-${{ inputs.version }}.sha256
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable container
+        id: image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          SOURCE_DATE_EPOCH: "0"
+        with:
+          context: .
+          github-token: ""
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.refs.outputs.image }}:${{ inputs.version }}
+            ${{ steps.refs.outputs.image }}:sha-${{ github.sha }}-${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.created=1970-01-01T00:00:00Z
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify published image matches scanned candidate
+        env:
+          VERSION: ${{ inputs.version }}
+          IMAGE: ${{ steps.refs.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          expected_config="$(< "presence-monitor-$VERSION.image-id")"
+          if [[ ! "$expected_config" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "candidate image ID is malformed" >&2
+            exit 1
+          fi
+
+          published_index="$(docker buildx imagetools inspect "$IMAGE@$IMAGE_DIGEST" --raw)"
+          if jq -e '.manifests | type == "array"' <<< "$published_index" >/dev/null; then
+            platform_digests="$(
+              jq -c '[.manifests[]
+                | select(.platform.os == "linux")
+                | select(.platform.architecture == "amd64")
+                | select((.platform.variant // "") == "")
+                | .digest]
+              ' <<< "$published_index"
+            )"
+            platform_count="$(jq -r 'length' <<< "$platform_digests")"
+            platform_digest="$(jq -r '.[0] // empty' <<< "$platform_digests")"
+            if [[ "$platform_count" != "1" ]]; then
+              echo "published index must contain exactly one linux/amd64 manifest" >&2
+              exit 1
+            fi
+            if [[ ! "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "published linux/amd64 manifest digest is malformed" >&2
+              exit 1
+            fi
+            published_manifest="$(docker buildx imagetools inspect "$IMAGE@$platform_digest" --raw)"
+          else
+            published_manifest="$published_index"
+          fi
+
+          published_config="$(jq -r '.config.digest // empty' <<< "$published_manifest")"
+          if [[ "$published_config" != "$expected_config" ]]; then
+            echo "published image config does not match the scanned candidate" >&2
+            echo "candidate: $expected_config" >&2
+            echo "published: $published_config" >&2
+            exit 1
+          fi
+
+      - name: Attest published container digest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.refs.outputs.image }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          IMAGE: ${{ steps.refs.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          release_flags=(--verify-tag --generate-notes --title "Presence Monitor v$VERSION")
+          if [[ "$PRERELEASE" == "true" ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "v$VERSION" \
+            "presence-monitor-$VERSION.tar.gz" \
+            "presence-monitor-$VERSION.image-id" \
+            "presence-monitor-$VERSION.sha256" \
+            --notes "Container: $IMAGE:$VERSION@$IMAGE_DIGEST" \
+            "${release_flags[@]}"
