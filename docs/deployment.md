@@ -32,6 +32,17 @@ The application container runs as UID/GID `10001`. Create the bind-mounted
 `backups/` directory with that ownership and mode `0700`; the named `/data`
 volume is initialized with the correct ownership by the image.
 
+The frontend build uses the official npm registry by default. On a network
+where that endpoint is unavailable, an operator can select a trusted compatible
+registry without editing the Dockerfile; package tarballs are still verified
+against the integrity values in `package-lock.json`:
+
+```bash
+docker compose build \
+  --build-arg NPM_CONFIG_REGISTRY=https://your-trusted-registry.example \
+  vrchat-monitor
+```
+
 1. Check `docker compose ps` and `/readyz` after every deployment.
 2. Run a backup before upgrades and require a recent off-site R2 upload.
 3. Require the automated daily downloaded restore drill to be recent; run another

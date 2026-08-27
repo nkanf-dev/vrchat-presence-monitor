@@ -3,6 +3,7 @@
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS web-builder
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY web/ ./
 RUN npm run build

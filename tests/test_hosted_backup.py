@@ -141,6 +141,9 @@ class HostedBackupTests(unittest.TestCase):
         self.assertIn("scripts/backup_format.py", dockerfile)
         self.assertIn("scripts/r2_backup.py", dockerfile)
         self.assertIn("scripts/restore_hosted.py", dockerfile)
+        self.assertIn(
+            "ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org", dockerfile
+        )
 
         offsite = compose.split("  offsite-backup:", 1)[1].split("\n  ", 1)[0]
         self.assertNotIn("/data", offsite)
