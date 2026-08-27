@@ -1,0 +1,50 @@
+# macOS and editor noise
+.DS_Store
+.AppleDouble
+.LSOverride
+.vscode/
+.idea/
+.codex/
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.venv/
+node_modules/
+.wrangler/
+.wrangler-*/
+*.tsbuildinfo
+
+# Deployment secrets and private exports
+/.secrets/
+/backups/
+/.env
+/.env.*
+*.pem
+*.key
+
+# Generated hosted frontend (built by Vite in CI and Docker)
+/server/static/
+
+# Local monitor state and credentials
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.cookie
+*.session
+*.log
+*.legacy.log
+.picoworks-vrchat-monitor/
+
+# Large or unrelated workspace material
+/apks/
+/captures/
+/logs/
+/pico4u-vr-sleep-workaround/
+/research/
+
+# Local deployment files with machine-specific paths
+*.local.plist

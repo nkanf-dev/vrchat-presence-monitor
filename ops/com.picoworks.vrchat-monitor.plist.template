@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.picoworks.vrchat-monitor</string>
+  <key>ProgramArguments</key>
+  <array><string>__PYTHON_BIN__</string><string>-m</string><string>vrchat_monitor.app</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONPATH</key><string>__APP_DIR__</string><key>VRCHAT_MONITOR_PORT</key><string>8842</string></dict>
+  <key>WorkingDirectory</key><string>__APP_DIR__</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__DATA_DIR__/monitor.log</string>
+  <key>StandardErrorPath</key><string>__DATA_DIR__/monitor.error.log</string>
+</dict>
+</plist>

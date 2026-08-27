@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.picoworks.vrchat-tunnel-watchdog</string>
+  <key>ProgramArguments</key>
+  <array><string>__PYTHON_BIN__</string><string>__APP_DIR__/scripts/watch_vrchat_tunnel.py</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>VRCHAT_MONITOR_PUBLIC_URL</key><string>__PUBLIC_URL__</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>__DATA_DIR__/tunnel-watchdog.log</string>
+  <key>StandardErrorPath</key><string>__DATA_DIR__/tunnel-watchdog.log</string>
+</dict>
+</plist>
