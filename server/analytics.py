@@ -402,9 +402,23 @@ class AnalyticsService:
         day_start, day_end = self._day_bounds(selected, self.zone, current)
         timeline: list[dict[str, Any]] = []
         heatmap: list[dict[str, Any]] = []
-        completed_days = max(
-            0, range_days - (1 if range_start <= today <= range_end else 0)
+        completed_days = sum(
+            1
+            for offset in range(range_days)
+            if range_start + timedelta(days=offset) < today
         )
+        observed_minutes = [0.0] * 24
+        for offset in range(range_days):
+            observed_day = range_start + timedelta(days=offset)
+            observed_start, observed_end = self._day_bounds(
+                observed_day, self.zone, current
+            )
+            for hour in range(24):
+                hour_start = observed_start + timedelta(hours=hour)
+                hour_end = min(hour_start + timedelta(hours=1), observed_end)
+                observed_minutes[hour] += max(
+                    0.0, (hour_end - hour_start).total_seconds() / 60
+                )
         for friend in friends:
             friend_id = str(friend["id"])
             friend_events = grouped.get(friend_id, [])
@@ -431,8 +445,6 @@ class AnalyticsService:
             total_minutes = [0.0] * 24
             for offset in range(range_days):
                 current_day = range_start + timedelta(days=offset)
-                if current_day == today:
-                    continue
                 current_start, current_end = self._day_bounds(
                     current_day, self.zone, current
                 )
@@ -453,8 +465,10 @@ class AnalyticsService:
                     "id": friend_id,
                     "name": str(friend["display_name"]),
                     "values": [
-                        round(value / (max(1, completed_days) * 60), 3)
-                        for value in total_minutes
+                        round(value / observed_minutes[hour], 3)
+                        if observed_minutes[hour] > 0
+                        else 0.0
+                        for hour, value in enumerate(total_minutes)
                     ],
                 }
             )
@@ -465,7 +479,9 @@ class AnalyticsService:
             "future_clamped": future_clamped,
             "heatmap_from": range_start.isoformat(),
             "heatmap_to": range_end.isoformat(),
-            "heatmap_days": completed_days,
+            "heatmap_days": range_days,
+            "heatmap_complete_days": completed_days,
+            "heatmap_observed_minutes": [round(value, 1) for value in observed_minutes],
             "timezone": self.zone.key,
             "timeline": timeline,
             "heatmap": heatmap,
