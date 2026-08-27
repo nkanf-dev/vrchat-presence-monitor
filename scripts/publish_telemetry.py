@@ -66,15 +66,18 @@ def _request_bytes(
                     raise RuntimeError("服务响应超过大小限制")
                 return result
         except urllib.error.HTTPError as error:
-            retryable = error.code == 429 or 500 <= error.code < 600
-            if not retryable or attempt + 1 >= attempts:
-                detail = error.read(2048).decode("utf-8", "replace")
-                raise BridgeHTTPError(error.code, detail or str(error.reason)) from error
-            retry_after = error.headers.get("Retry-After", "")
             try:
-                delay = max(1.0, min(float(retry_after), 300.0))
-            except ValueError:
-                delay = min(30.0, 2.0**attempt + random.random())
+                retryable = error.code == 429 or 500 <= error.code < 600
+                if not retryable or attempt + 1 >= attempts:
+                    detail = error.read(2048).decode("utf-8", "replace")
+                    raise BridgeHTTPError(error.code, detail or str(error.reason)) from error
+                retry_after = error.headers.get("Retry-After", "")
+                try:
+                    delay = max(1.0, min(float(retry_after), 300.0))
+                except ValueError:
+                    delay = min(30.0, 2.0**attempt + random.random())
+            finally:
+                error.close()
             time.sleep(delay)
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as error:
             if attempt + 1 >= attempts:

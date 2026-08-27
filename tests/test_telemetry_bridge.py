@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.publish_telemetry import (
+    BridgeHTTPError,
+    _request_bytes,
     collect_events,
     collect_legacy_csv,
     legacy_prefix_digest,
@@ -17,6 +22,47 @@ from scripts.publish_telemetry import (
 
 
 class TelemetryBridgeTests(unittest.TestCase):
+    def test_http_error_responses_are_closed_on_retry_and_failure(self):
+        retry_body = io.BytesIO(b"wait")
+        retry_error = urllib.error.HTTPError(
+            "https://presence.example/v1/telemetry",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "0"},
+            retry_body,
+        )
+        response = io.BytesIO(b"accepted")
+        with (
+            patch(
+                "scripts.publish_telemetry.urllib.request.urlopen",
+                side_effect=[retry_error, response],
+            ),
+            patch("scripts.publish_telemetry.time.sleep"),
+        ):
+            self.assertEqual(
+                _request_bytes("https://presence.example/v1/telemetry", attempts=2),
+                b"accepted",
+            )
+        self.assertTrue(retry_body.closed)
+
+        terminal_body = io.BytesIO(b"denied")
+        terminal_error = urllib.error.HTTPError(
+            "https://presence.example/v1/telemetry",
+            403,
+            "Forbidden",
+            {},
+            terminal_body,
+        )
+        with (
+            patch(
+                "scripts.publish_telemetry.urllib.request.urlopen",
+                side_effect=terminal_error,
+            ),
+            self.assertRaises(BridgeHTTPError),
+        ):
+            _request_bytes("https://presence.example/v1/telemetry", attempts=1)
+        self.assertTrue(terminal_body.closed)
+
     def test_history_collection_stops_at_cursor_and_returns_oldest_first(self):
         pages = {
             0: {"items": [{"id": 5}, {"id": 4}], "has_more": True},
