@@ -13,8 +13,14 @@ from datetime import datetime, time as time_type, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from vrchat_monitor.vrchat import USER_AGENT, VRChatError, world_id_from_location
+from vrchat_monitor.vrchat import USER_AGENT, VRChatError
 
+from .observation import (
+    TimeWindow,
+    build_online_spans,
+    build_world_spans,
+    effective_state,
+)
 from .storage import Store
 
 
@@ -74,13 +80,7 @@ class AnalyticsService:
 
     @staticmethod
     def _effective_state(status: str, location: str, is_self: bool = False) -> str:
-        normalized_status = str(status or "offline").strip().lower() or "offline"
-        normalized_location = str(location or "").strip().lower()
-        if normalized_location == "offline":
-            return "offline"
-        if is_self and not normalized_location:
-            return "offline"
-        return normalized_status
+        return effective_state(status, location, is_self)
 
     @classmethod
     def _online_spans(
@@ -93,43 +93,23 @@ class AnalyticsService:
     ) -> list[dict[str, Any]]:
         if end <= start:
             return []
-        state = "offline"
-        cursor = start
-        spans: list[dict[str, Any]] = []
-        for event in events:
-            occurred = _parse_time(event.get("occurred_at"))
-            if occurred is None:
-                continue
-            occurred = occurred.astimezone(zone)
-            new_state = cls._effective_state(
-                str(event.get("new_status") or "offline"),
-                str(event.get("location") or ""),
-                is_self,
-            )
-            if occurred < start:
-                state = new_state
-                continue
-            if occurred >= end:
-                break
-            if state != "offline" and occurred > cursor:
-                spans.append(
-                    {
-                        "start_minute": round((cursor - start).total_seconds() / 60),
-                        "end_minute": round((occurred - start).total_seconds() / 60),
-                        "status": state,
-                    }
-                )
-            state = new_state
-            cursor = max(cursor, occurred)
-        if state != "offline" and end > cursor:
-            spans.append(
-                {
-                    "start_minute": round((cursor - start).total_seconds() / 60),
-                    "end_minute": round((end - start).total_seconds() / 60),
-                    "status": state,
-                }
-            )
-        return [span for span in spans if span["end_minute"] > span["start_minute"]]
+        query_start = start.astimezone(timezone.utc)
+        spans = build_online_spans(
+            events,
+            [TimeWindow(start.astimezone(zone), end.astimezone(zone))],
+            start,
+            end,
+            is_self=is_self,
+        )
+        result = [
+            {
+                "start_minute": round((span.start - query_start).total_seconds() / 60),
+                "end_minute": round((span.end - query_start).total_seconds() / 60),
+                "status": span.status,
+            }
+            for span in spans
+        ]
+        return [span for span in result if span["end_minute"] > span["start_minute"]]
 
     @classmethod
     def _online_seconds(
@@ -141,31 +121,14 @@ class AnalyticsService:
     ) -> float:
         if end <= start:
             return 0.0
-        state = "offline"
-        cursor = start
-        seconds = 0.0
-        for event in events:
-            occurred = _parse_time(event.get("occurred_at"))
-            if occurred is None:
-                continue
-            occurred = occurred.astimezone(timezone.utc)
-            new_state = cls._effective_state(
-                str(event.get("new_status") or "offline"),
-                str(event.get("location") or ""),
-                is_self,
-            )
-            if occurred < start:
-                state = new_state
-                continue
-            if occurred >= end:
-                break
-            if state != "offline" and occurred > cursor:
-                seconds += (occurred - cursor).total_seconds()
-            state = new_state
-            cursor = max(cursor, occurred)
-        if state != "offline" and end > cursor:
-            seconds += (end - cursor).total_seconds()
-        return max(0.0, seconds)
+        spans = build_online_spans(
+            events,
+            [TimeWindow(start, end)],
+            start,
+            end,
+            is_self=is_self,
+        )
+        return sum((span.end - span.start).total_seconds() for span in spans)
 
     @classmethod
     def _world_spans(
@@ -178,61 +141,26 @@ class AnalyticsService:
     ) -> list[dict[str, Any]]:
         if end <= start:
             return []
-        state = "offline"
-        location = ""
-        platform = ""
-        cursor = start
-        spans: list[dict[str, Any]] = []
-        for event in events:
-            occurred = _parse_time(event.get("occurred_at"))
-            if occurred is None:
-                continue
-            occurred = occurred.astimezone(zone)
-            event_location = str(event.get("location") or "")
-            event_platform = str(event.get("platform") or "")
-            new_state = cls._effective_state(
-                str(event.get("new_status") or "offline"),
-                event_location,
-                is_self,
-            )
-            if occurred < start:
-                state = new_state
-                if event_location:
-                    location = event_location
-                if event_platform:
-                    platform = event_platform
-                continue
-            if occurred >= end:
-                break
-            if state != "offline" and occurred > cursor:
-                spans.append(
-                    {
-                        "start_minute": round((cursor - start).total_seconds() / 60),
-                        "end_minute": round((occurred - start).total_seconds() / 60),
-                        "status": state,
-                        "location": location,
-                        "world_id": world_id_from_location(location) or "",
-                        "platform": platform,
-                    }
-                )
-            state = new_state
-            if event_location:
-                location = event_location
-            if event_platform:
-                platform = event_platform
-            cursor = max(cursor, occurred)
-        if state != "offline" and end > cursor:
-            spans.append(
-                {
-                    "start_minute": round((cursor - start).total_seconds() / 60),
-                    "end_minute": round((end - start).total_seconds() / 60),
-                    "status": state,
-                    "location": location,
-                    "world_id": world_id_from_location(location) or "",
-                    "platform": platform,
-                }
-            )
-        return [span for span in spans if span["end_minute"] > span["start_minute"]]
+        query_start = start.astimezone(timezone.utc)
+        spans = build_world_spans(
+            events,
+            [TimeWindow(start.astimezone(zone), end.astimezone(zone))],
+            start,
+            end,
+            is_self=is_self,
+        )
+        result = [
+            {
+                "start_minute": round((span.start - query_start).total_seconds() / 60),
+                "end_minute": round((span.end - query_start).total_seconds() / 60),
+                "status": span.status,
+                "location": span.location,
+                "world_id": span.world_id,
+                "platform": span.platform,
+            }
+            for span in spans
+        ]
+        return [span for span in result if span["end_minute"] > span["start_minute"]]
 
     def _snapshot(
         self,
