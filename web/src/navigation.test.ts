@@ -1,18 +1,25 @@
 import { act, renderHook } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  getDetailHistoryMarker,
   parametersForRoute,
   parseRoute,
   routeForArea,
   routeToView,
+  useHashParameters,
   useHashRoute,
 } from './navigation';
 
 describe('product navigation', () => {
   afterEach(() => {
-    window.location.hash = '';
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}`,
+    );
     window.sessionStorage.clear();
+    vi.restoreAllMocks();
   });
 
   it.each([
@@ -120,5 +127,94 @@ describe('product navigation', () => {
     expect(result.current.parameters.get('historyPage')).toBe('8');
     expect(result.current.parameters.get('y')).toBe('74');
     expect(result.current.parameters.get('kept')).toBe('yes');
+  });
+
+  it('marks nested person and world entries and unwinds one matching layer at a time', () => {
+    window.history.replaceState(
+      { preserved: 'base' },
+      '',
+      `${window.location.pathname}${window.location.search}#area=people`,
+    );
+    const { result } = renderHook(() => useHashParameters());
+
+    act(() => result.current.openDetail('person', 'usr_alice', { personTab: null }));
+
+    expect(getDetailHistoryMarker()).toEqual({ type: 'person', id: 'usr_alice' });
+    expect(window.history.state).toMatchObject({ preserved: 'base' });
+    const personUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    const personState = window.history.state;
+
+    act(() => result.current.openDetail('world', 'wrld_coffee'));
+
+    expect(getDetailHistoryMarker()).toEqual({ type: 'world', id: 'wrld_coffee' });
+    expect(result.current.parameters.get('personDetail')).toBe('usr_alice');
+    expect(result.current.parameters.get('worldDetail')).toBe('wrld_coffee');
+
+    const back = vi.spyOn(window.history, 'back').mockImplementation(() => undefined);
+    let closeMode = '';
+    act(() => {
+      closeMode = result.current.closeDetail('world', 'wrld_coffee');
+    });
+    expect(closeMode).toBe('back');
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(getDetailHistoryMarker()).toEqual({ type: 'world', id: 'wrld_coffee' });
+
+    act(() => {
+      closeMode = result.current.closeDetail('world', 'wrld_coffee');
+    });
+    expect(closeMode).toBe('back-pending');
+    expect(back).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      window.history.replaceState(personState, '', personUrl);
+      window.dispatchEvent(new PopStateEvent('popstate', { state: personState }));
+    });
+    expect(getDetailHistoryMarker()).toEqual({ type: 'person', id: 'usr_alice' });
+    expect(result.current.parameters.get('worldDetail')).toBeNull();
+
+    act(() => {
+      closeMode = result.current.closeDetail('person', 'usr_alice', { personTab: null });
+    });
+    expect(closeMode).toBe('back');
+    expect(back).toHaveBeenCalledTimes(2);
+  });
+
+  it('cleans a direct detail deep-link in place instead of leaving the page', () => {
+    window.history.replaceState(
+      { preserved: 'deep-link' },
+      '',
+      `${window.location.pathname}${window.location.search}#area=people&personDetail=usr_deep&personTab=worlds`,
+    );
+    const back = vi.spyOn(window.history, 'back').mockImplementation(() => undefined);
+    const { result } = renderHook(() => useHashParameters());
+    let closeMode = '';
+
+    act(() => {
+      closeMode = result.current.closeDetail('person', 'usr_deep', { personTab: null });
+    });
+
+    expect(closeMode).toBe('replace');
+    expect(back).not.toHaveBeenCalled();
+    expect(result.current.parameters.get('personDetail')).toBeNull();
+    expect(result.current.parameters.get('personTab')).toBeNull();
+    expect(window.history.state).toEqual({ preserved: 'deep-link' });
+  });
+
+  it('does not copy a detail marker into an ordinary hash navigation entry', () => {
+    window.history.replaceState(
+      { preserved: 'base' },
+      '',
+      `${window.location.pathname}${window.location.search}#area=people`,
+    );
+    const { result } = renderHook(() => useHashParameters());
+
+    act(() => result.current.openDetail('person', 'usr_alice'));
+    expect(getDetailHistoryMarker()).toEqual({ type: 'person', id: 'usr_alice' });
+
+    act(() => result.current.update({ peopleQ: 'bob' }));
+
+    expect(getDetailHistoryMarker()).toBeNull();
+    expect(window.history.state).toEqual({ preserved: 'base' });
+    expect(result.current.parameters.get('peopleQ')).toBe('bob');
   });
 });

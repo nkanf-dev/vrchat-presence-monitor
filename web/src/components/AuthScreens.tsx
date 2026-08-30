@@ -1,4 +1,4 @@
-import { ArrowRight, RefreshCw, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, RefreshCw, X } from 'lucide-react';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { ApiError } from '../api';
@@ -55,6 +55,7 @@ type LoginFlowProps = {
   onLogin: (credentials: { username: string; password: string }) => Promise<void>;
   onVerify: (code: string) => Promise<void>;
   onEdit: () => void;
+  onBack: () => void;
 };
 
 function VrchatLoginPanel({
@@ -64,6 +65,7 @@ function VrchatLoginPanel({
   onLogin,
   onVerify,
   onEdit,
+  onBack,
   reconnect = false,
 }: LoginFlowProps & { reconnect?: boolean }) {
   const [username, setUsername] = useState('');
@@ -176,6 +178,17 @@ function VrchatLoginPanel({
             {pending ? '正在登录…' : requiresTwoFactor ? '验证并继续' : reconnect ? '重新连接' : '登录'}
             {!pending && <ArrowRight size={18} aria-hidden="true" />}
           </button>
+          {requiresTwoFactor && (
+            <button
+              className="button button-secondary button-wide"
+              type="button"
+              onClick={onBack}
+              disabled={pending}
+            >
+              <ArrowLeft size={18} aria-hidden="true" />
+              返回登录
+            </button>
+          )}
         </form>
     </>
   );

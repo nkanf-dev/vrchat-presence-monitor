@@ -88,6 +88,8 @@ const libraryResult = {
   total: 1,
 };
 
+const scrollIntoView = vi.fn();
+
 function renderView(onOpenWorld = vi.fn()) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: Infinity } },
@@ -104,6 +106,10 @@ function renderView(onOpenWorld = vi.fn()) {
 
 describe('DiscoveryView', () => {
   beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
     api.getFriends.mockResolvedValue({
       items: [{
         id: 'usr_alice',
@@ -128,7 +134,7 @@ describe('DiscoveryView', () => {
   });
 
   it('passes hash filters to discovery and opens a world without losing timeline state', async () => {
-    window.location.hash = '#area=analysis&section=discover&day=2026-08-21&discoverDays=30&discoverFriend=usr_alice&discoverTag=author_tag_social&discoverSelf=0';
+    window.location.hash = '#area=analysis&section=discover&day=2026-08-21&discoverDays=30&discoverFriend=usr_alice&discoverTag=author_tag_social&discoverSelf=0&y=915';
     const onOpenWorld = vi.fn();
     renderView(onOpenWorld);
 
@@ -153,10 +159,11 @@ describe('DiscoveryView', () => {
     expect(target.get('person')).toBe('usr_alice');
     expect(target.get('day')).toBe('2026-08-21');
     expect(target.get('discoverTag')).toBe('author_tag_social');
+    expect(target.get('y')).toBe('0');
   });
 
   it('keeps tab and filter state in the hash when opening the world library', async () => {
-    window.location.hash = '#area=analysis&section=discover&day=2026-08-20&discoverDays=30&discoverTag=author_tag_social&discoverPage=2';
+    window.location.hash = '#area=analysis&section=discover&day=2026-08-20&discoverDays=30&discoverTag=author_tag_social&discoverPage=2&y=640';
     api.getDiscovery.mockResolvedValue({
       ...discoveryResult,
       hot_total: 60,
@@ -176,6 +183,7 @@ describe('DiscoveryView', () => {
       expect(parameters.get('discoverTag')).toBe('author_tag_social');
       expect(parameters.get('discoverPage')).toBeNull();
       expect(parameters.get('day')).toBe('2026-08-20');
+      expect(parameters.get('y')).toBeNull();
     });
     expect(api.getWorldLibrary).toHaveBeenCalledWith(expect.objectContaining({
       worldTag: 'author_tag_social',
@@ -184,7 +192,7 @@ describe('DiscoveryView', () => {
   });
 
   it('shows world-tag counts and keeps the selected tag in the hash', async () => {
-    window.location.hash = '#area=analysis&section=discover&discoverPage=2';
+    window.location.hash = '#area=analysis&section=discover&discoverPage=2&y=520';
     api.getDiscovery.mockResolvedValue({
       ...discoveryResult,
       hot_total: 60,
@@ -201,6 +209,7 @@ describe('DiscoveryView', () => {
       expect(new URLSearchParams(window.location.hash.slice(1)).get('discoverTag'))
         .toBe('author_tag_social');
       expect(new URLSearchParams(window.location.hash.slice(1)).get('discoverPage')).toBeNull();
+      expect(new URLSearchParams(window.location.hash.slice(1)).get('y')).toBeNull();
     });
     expect(api.getDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
       worldTag: 'author_tag_social',
@@ -209,7 +218,7 @@ describe('DiscoveryView', () => {
   });
 
   it('supports all-time scope and server-backed ranking pages in the hash', async () => {
-    window.location.hash = '#area=analysis&section=discover&discoverDays=0&discoverPage=2';
+    window.location.hash = '#area=analysis&section=discover&discoverDays=0&discoverPage=2&y=880';
     api.getDiscovery.mockResolvedValue({
       ...discoveryResult,
       hot_total: 61,
@@ -230,13 +239,19 @@ describe('DiscoveryView', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '热门世界下一页' }));
     await waitFor(() => {
-      expect(new URLSearchParams(window.location.hash.slice(1)).get('discoverPage')).toBe('3');
+      const parameters = new URLSearchParams(window.location.hash.slice(1));
+      expect(parameters.get('discoverPage')).toBe('3');
+      expect(parameters.get('y')).toBeNull();
     });
     expect(api.getDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 60 }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByRole('heading', { name: '好友热门世界' }));
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
   });
 
   it('resets ranking pagination when the scope changes', async () => {
-    window.location.hash = '#area=analysis&section=discover&discoverDays=30&discoverPage=2';
+    window.location.hash = '#area=analysis&section=discover&discoverDays=30&discoverPage=2&y=720';
     api.getDiscovery.mockResolvedValue({
       ...discoveryResult,
       hot_total: 60,
@@ -252,11 +267,40 @@ describe('DiscoveryView', () => {
       const parameters = new URLSearchParams(window.location.hash.slice(1));
       expect(parameters.get('discoverDays')).toBe('0');
       expect(parameters.get('discoverPage')).toBeNull();
+      expect(parameters.get('y')).toBeNull();
     });
     expect(api.getDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
       days: 0,
       offset: 0,
     }));
+  });
+
+  it('restores a numeric library page from the hash and can go to the previous page', async () => {
+    window.location.hash = '#area=analysis&section=discover&discoverTab=library&libraryPage=3&y=960';
+    api.getWorldLibrary.mockResolvedValue({ ...libraryResult, total: 108 });
+    renderView();
+
+    expect(await screen.findByText('Quiet Library')).toBeVisible();
+    expect(api.getWorldLibrary).toHaveBeenCalledWith(expect.objectContaining({
+      offset: 72,
+      limit: 36,
+    }));
+    expect(screen.getByRole('status', { name: '' })).toHaveTextContent('第 3 / 3 页');
+
+    await userEvent.click(screen.getByRole('button', { name: '世界库上一页' }));
+    await waitFor(() => {
+      const parameters = new URLSearchParams(window.location.hash.slice(1));
+      expect(parameters.get('libraryPage')).toBe('2');
+      expect(parameters.get('y')).toBeNull();
+    });
+    expect(api.getWorldLibrary).toHaveBeenLastCalledWith(expect.objectContaining({
+      offset: 36,
+      limit: 36,
+    }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByRole('heading', { name: '到访世界库' }));
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
   });
 
   it('shows an explicit empty state when no world tags exist', async () => {

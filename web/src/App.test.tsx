@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
+import { getDetailHistoryMarker } from './navigation';
 
 const jsonResponse = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), {
@@ -30,7 +31,11 @@ describe('product state machine', () => {
   afterEach(() => {
     localStorage.clear();
     sessionStorage.clear();
-    window.location.hash = '';
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}`,
+    );
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -273,7 +278,102 @@ describe('product state machine', () => {
     expect(screen.queryByLabelText('VRChat 账号')).not.toBeInTheDocument();
   });
 
-  it('opens friend details as a keyboard-accessible dialog', async () => {
+  it('returns from login verification to credentials without ending any session', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(401, { error: 'unauthorized' }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          ok: true,
+          requires_2fa: true,
+          methods: ['totp'],
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.type(await screen.findByLabelText('VRChat 账号'), 'alice@example.com');
+    await user.type(screen.getByLabelText('密码'), 'correct horse');
+    await user.click(screen.getByRole('button', { name: '登录' }));
+
+    expect(await screen.findByLabelText('验证码')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '返回登录' }));
+
+    expect(await screen.findByLabelText('VRChat 账号')).toHaveValue('alice@example.com');
+    expect(screen.getByLabelText('密码')).toHaveValue('');
+    expect(screen.queryByLabelText('验证码')).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain('/v1/logout');
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain(
+      '/v1/vrchat/disconnect',
+    );
+  });
+
+  it('returns from reconnect verification without closing the dialog or stopping collection', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/v1/me') {
+        return Promise.resolve(
+          jsonResponse(200, {
+            authenticated: true,
+            migrated: false,
+            user: { tenant_id: 'ten_1', name: 'Alice 的监控' },
+          }),
+        );
+      }
+      if (path === '/v1/overview') {
+        return Promise.resolve(
+          jsonResponse(200, {
+            tracked_count: 29,
+            online_count: 0,
+            event_total: 10,
+            change_count_7d: 1,
+            status_counts: { offline: 29 },
+            last_sync: '2026-08-30T20:00:00+00:00',
+            collector_error: 'VRChat session expired; login required',
+            collector_state: 'error',
+            sync_age_seconds: 900,
+            stale_after_seconds: 300,
+          }),
+        );
+      }
+      if (path.startsWith('/v1/friends?')) {
+        return Promise.resolve(jsonResponse(200, { items: [], total: 0, limit: 50, offset: 0 }));
+      }
+      if (path.startsWith('/v1/events?')) {
+        return Promise.resolve(jsonResponse(200, { items: [], total: 0, limit: 8, offset: 0 }));
+      }
+      if (path === '/v1/vrchat/login') {
+        return Promise.resolve(
+          jsonResponse(200, { ok: true, requires_2fa: true, methods: ['totp'] }),
+        );
+      }
+      return Promise.resolve(jsonResponse(404, { error: 'not found' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole('button', { name: '重新连接 VRChat' }));
+    const dialog = screen.getByRole('dialog', { name: '重新连接 VRChat' });
+    await user.type(within(dialog).getByLabelText('VRChat 账号'), 'alice@example.com');
+    await user.type(within(dialog).getByLabelText('密码'), 'correct horse');
+    await user.click(within(dialog).getByRole('button', { name: '重新连接' }));
+
+    expect(await within(dialog).findByLabelText('验证码')).toBeVisible();
+    await user.click(within(dialog).getByRole('button', { name: '返回登录' }));
+
+    expect(await within(dialog).findByRole('heading', { name: '重新连接 VRChat' })).toBeVisible();
+    expect(dialog).toHaveAttribute('open');
+    expect(within(dialog).queryByLabelText('验证码')).not.toBeInTheDocument();
+    const paths = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(paths).toContain('/v1/vrchat/login');
+    expect(paths).not.toContain('/v1/logout');
+    expect(paths).not.toContain('/v1/vrchat/disconnect');
+  });
+
+  it('opens friend details in a marked entry and closes by unwinding one layer', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -325,7 +425,10 @@ describe('product state machine', () => {
     await user.click(person);
 
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'Alice' })).toHaveAttribute('open'));
-    expect(screen.getByRole('button', { name: '关闭玩家详情' })).toBeVisible();
+    expect(getDetailHistoryMarker()).toEqual({ type: 'person', id: 'usr_1' });
+    const back = vi.spyOn(window.history, 'back').mockImplementation(() => undefined);
+    await user.click(screen.getByRole('button', { name: '关闭玩家详情' }));
+    expect(back).toHaveBeenCalledTimes(1);
   });
 
   it('keeps another view usable when the overview request fails', async () => {

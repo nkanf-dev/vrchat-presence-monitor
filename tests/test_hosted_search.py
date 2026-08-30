@@ -121,6 +121,19 @@ class HostedSearchTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["groups"]["worlds"][0]["id"], world_id)
 
+    def test_history_search_result_uses_canonical_history_href(self):
+        response = self.client.get(
+            "/v1/search",
+            params={"q": "active", "limit": 8},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        history = response.json()["groups"]["history"]
+        self.assertTrue(history)
+        self.assertEqual(
+            {item["href"] for item in history},
+            {"#area=more&section=history&historyQ=active"},
+        )
+
     def test_search_never_returns_other_tenant_note(self):
         other = self.store.bootstrap("Other", "collector")
         self.store.ingest(

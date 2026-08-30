@@ -149,6 +149,9 @@ export function GlobalSearch() {
     enabled: open && debounced.length > 0,
     staleTime: 30_000,
   });
+  const normalizedQuery = query.trim();
+  const debouncePending = normalizedQuery !== debounced;
+  const searchLoading = debouncePending || (normalizedQuery.length > 0 && result.isPending);
   const items = useMemo(() => flattenResults(result.data), [result.data]);
   const recentItems = useMemo(() => {
     const ordered = recent
@@ -161,7 +164,11 @@ export function GlobalSearch() {
       ...item,
     }));
   }, [recent]);
-  const displayed = debounced ? items : recentItems;
+  const displayed = debouncePending
+    ? []
+    : normalizedQuery
+      ? (result.isPending || result.isError ? [] : items)
+      : recentItems;
 
   useEffect(() => setActiveIndex(0), [debounced, result.data]);
 
@@ -230,6 +237,12 @@ export function GlobalSearch() {
                 } else if (event.key === 'ArrowUp' && displayed.length) {
                   event.preventDefault();
                   setActiveIndex((value) => (value - 1 + displayed.length) % displayed.length);
+                } else if (event.key === 'Enter' && debouncePending) {
+                  event.preventDefault();
+                  setDebounced(normalizedQuery);
+                  setActiveIndex(0);
+                } else if (event.key === 'Enter' && searchLoading) {
+                  event.preventDefault();
                 } else if (event.key === 'Enter' && displayed[activeIndex]) {
                   event.preventDefault();
                   select(displayed[activeIndex]);
@@ -247,24 +260,24 @@ export function GlobalSearch() {
           </div>
 
           <div id="global-search-results" className="global-search-results" role="listbox" aria-label="搜索结果">
-            {!debounced && <p className="search-section-label">最近前往</p>}
-            {debounced && result.isPending ? (
+            {!debouncePending && !normalizedQuery && <p className="search-section-label">最近前往</p>}
+            {searchLoading ? (
               <div className="search-state" role="status">正在搜索…</div>
-            ) : debounced && result.isError ? (
+            ) : normalizedQuery && result.isError ? (
               <div className="search-state" role="alert">
                 <strong>搜索暂时不可用</strong>
                 <span>{result.error instanceof ApiError ? result.error.message : '请稍后再试'}</span>
                 <button type="button" className="button button-secondary button-compact" onClick={() => void result.refetch()}>重试</button>
               </div>
-            ) : debounced && !displayed.length ? (
+            ) : normalizedQuery && !displayed.length ? (
               <div className="search-state">
-                <strong>没有找到“{debounced}”</strong>
+                <strong>没有找到“{normalizedQuery}”</strong>
                 <span>可以试试显示名、用户名、World ID 或状态。</span>
               </div>
             ) : (
               grouped.map((group) => (
                 <section className="search-result-group" key={group.group} aria-label={groupLabels[group.group]}>
-                  {debounced && <h2>{groupLabels[group.group]}</h2>}
+                  {normalizedQuery && <h2>{groupLabels[group.group]}</h2>}
                   {group.items.map((item) => {
                     const index = displayed.findIndex((candidate) => candidate.key === item.key);
                     return (

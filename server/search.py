@@ -242,7 +242,10 @@ class SearchService:
                 "new_status": str(row["new_status"]),
                 "location": str(row["location"]),
                 "platform": str(row["platform"]),
-                "href": f"#view=history&q={quote(parsed.text)}",
+                "href": (
+                    "#area=more&section=history&historyQ="
+                    f"{quote(parsed.text, safe='')}"
+                ),
             }
             for row in rows
         ]

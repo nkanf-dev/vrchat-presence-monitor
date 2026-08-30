@@ -91,7 +91,8 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
   const queryClient = useQueryClient();
   const {
     parameters,
-    update,
+    openDetail,
+    closeDetail,
     route,
     routeKey,
     view,
@@ -204,9 +205,9 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
   const worldDetailId = parameters.get('worldDetail');
   const openFriend = (friend: Friend) => {
     setFriendPreview(friend);
-    update({ personDetail: friend.id, personTab: null });
+    openDetail('person', friend.id, { personTab: null });
   };
-  const openWorld = (worldId: string) => update({ worldDetail: worldId });
+  const openWorld = (worldId: string) => openDetail('world', worldId);
 
   return (
     <AppShell
@@ -289,11 +290,16 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
         initialFriend={friendPreview?.id === friendDetailId ? friendPreview : null}
         onClose={() => {
           setFriendPreview(null);
-          update({ personDetail: null, personTab: null }, true);
+          if (friendDetailId) closeDetail('person', friendDetailId, { personTab: null });
         }}
         onOpenWorld={openWorld}
       />
-      <WorldDialog worldId={worldDetailId} onClose={() => update({ worldDetail: null }, true)} />
+      <WorldDialog
+        worldId={worldDetailId}
+        onClose={() => {
+          if (worldDetailId) closeDetail('world', worldDetailId);
+        }}
+      />
       <VrchatReconnectDialog
         open={reconnectOpen}
         pending={reconnectMutation.isPending || reconnectTwoFactorMutation.isPending}
@@ -307,6 +313,11 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
         onEdit={() => {
           reconnectMutation.reset();
           reconnectTwoFactorMutation.reset();
+        }}
+        onBack={() => {
+          reconnectMutation.reset();
+          reconnectTwoFactorMutation.reset();
+          setReconnectTwoFactor(false);
         }}
         onLogin={async (credentials) => {
           const result = await reconnectMutation.mutateAsync(credentials);
@@ -360,6 +371,11 @@ export function App() {
           onEdit={() => {
             loginMutation.reset();
             twoFactorMutation.reset();
+          }}
+          onBack={() => {
+            loginMutation.reset();
+            twoFactorMutation.reset();
+            setRequiresTwoFactor(false);
           }}
           onLogin={async (credentials) => {
             try {

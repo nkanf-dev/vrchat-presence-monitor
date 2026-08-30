@@ -269,11 +269,16 @@ describe('hosted API client', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getWorldLibrary({ query: 'coffee', friendId: 'usr_a', limit: 36 });
+    const result = await getWorldLibrary({
+      query: 'coffee',
+      friendId: 'usr_a',
+      offset: 72,
+      limit: 36,
+    });
 
     expect(result.items[0]?.name).toBe('Coffee');
     expect(fetchMock).toHaveBeenCalledWith(
-      '/v1/world-library?limit=36&q=coffee&friend_id=usr_a',
+      '/v1/world-library?limit=36&q=coffee&friend_id=usr_a&offset=72',
       expect.objectContaining({ credentials: 'same-origin' }),
     );
   });

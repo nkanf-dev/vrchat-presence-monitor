@@ -853,6 +853,7 @@ export const getWorldLibrary = (options: {
   /** @deprecated Use worldTag. */
   tagId?: string;
   cursor?: string;
+  offset?: number;
   limit?: number;
 } = {}) => {
   const parameters = new URLSearchParams({ limit: String(options.limit ?? 36) });
@@ -862,6 +863,7 @@ export const getWorldLibrary = (options: {
   const worldTag = options.worldTag ?? options.tagId;
   if (worldTag) parameters.set('world_tag', worldTag);
   if (options.cursor) parameters.set('cursor', options.cursor);
+  if (options.offset !== undefined) parameters.set('offset', String(options.offset));
   return request(`/v1/world-library?${parameters}`, worldLibrarySchema);
 };
 

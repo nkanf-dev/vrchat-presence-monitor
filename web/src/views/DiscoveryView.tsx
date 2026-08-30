@@ -1,7 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
-  ArrowLeft,
-  ArrowRight,
   BarChart3,
   BookOpen,
   Clock3,
@@ -13,7 +11,7 @@ import {
   TrendingUp,
   UsersRound,
 } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   getDiscovery,
@@ -39,6 +37,7 @@ type RankedWorld = DiscoveryWorld | RisingWorld;
 type WorldCardSource = RankedWorld | WorldLibraryItem;
 
 const RANKING_PAGE_SIZE = 30;
+const LIBRARY_PAGE_SIZE = 36;
 
 const tabs: Array<{
   id: DiscoveryTab;
@@ -68,6 +67,24 @@ const selectedDays = (value: string | null): DiscoveryDays => {
 const selectedPage = (value: string | null) => {
   const parsed = Number.parseInt(value ?? '1', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed - 1 : 0;
+};
+
+const withParameterUpdates = (
+  parameters: URLSearchParams,
+  values: Record<string, string | number | null>,
+) => {
+  const next = new URLSearchParams(parameters);
+  for (const [key, value] of Object.entries(values)) {
+    if (value === null || value === '') next.delete(key);
+    else next.set(key, String(value));
+  }
+  return next;
+};
+
+const resultsStateKey = (parameters: URLSearchParams) => {
+  const stable = new URLSearchParams(parameters);
+  stable.delete('y');
+  return stable.toString();
 };
 
 const worldIdOf = (world: WorldCardSource) => {
@@ -164,6 +181,7 @@ function timelineHref(
     const day = lastObserved.slice(0, 10);
     if (/^\d{4}-\d{2}-\d{2}$/.test(day)) next.set('day', day);
   }
+  next.set('y', '0');
   return `#${next.toString()}`;
 }
 
@@ -326,22 +344,25 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
   const includeSelf = parameters.get('discoverSelf') !== '0';
   const libraryQuery = parameters.get('libraryQ') ?? '';
   const libraryAuthor = parameters.get('libraryAuthor') ?? '';
-  const libraryCursor = parameters.get('libraryCursor') ?? '';
+  const libraryPage = selectedPage(parameters.get('libraryPage'));
   const [libraryDraft, setLibraryDraft] = useState(libraryQuery);
   const [authorDraft, setAuthorDraft] = useState(libraryAuthor);
-  const [cursorStack, setCursorStack] = useState<string[]>([]);
-  const previousCursor = useRef(libraryCursor);
+  const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const pendingResultsFocusKey = useRef<string | null>(null);
 
   useEffect(() => setLibraryDraft(libraryQuery), [libraryQuery]);
   useEffect(() => setAuthorDraft(libraryAuthor), [libraryAuthor]);
-  useEffect(() => {
-    if (previousCursor.current !== libraryCursor) {
-      setCursorStack((current) =>
-        current.at(-1) === libraryCursor ? current.slice(0, -1) : current,
-      );
-      previousCursor.current = libraryCursor;
-    }
-  }, [libraryCursor]);
+
+  const updateResults = useCallback((
+    values: Record<string, string | number | null>,
+    replace = false,
+  ) => {
+    const nextValues = { ...values, y: null };
+    pendingResultsFocusKey.current = resultsStateKey(
+      withParameterUpdates(parameters, nextValues),
+    );
+    update(nextValues, replace);
+  }, [parameters, update]);
 
   const friends = useQuery({
     queryKey: ['friends', 'discovery-filters'],
@@ -368,14 +389,14 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
     staleTime: 60_000,
   });
   const library = useQuery({
-    queryKey: ['world-library', libraryQuery, libraryAuthor, friendId, worldTag, libraryCursor],
+    queryKey: ['world-library', libraryQuery, libraryAuthor, friendId, worldTag, libraryPage],
     queryFn: () => getWorldLibrary({
       query: libraryQuery,
       author: libraryAuthor,
       friendId,
       worldTag,
-      cursor: libraryCursor,
-      limit: 36,
+      offset: libraryPage * LIBRARY_PAGE_SIZE,
+      limit: LIBRARY_PAGE_SIZE,
     }),
     enabled: tab === 'library',
     placeholderData: keepPreviousData,
@@ -399,25 +420,33 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
   );
 
   const changeSharedFilter = (values: Record<string, string | null>) => {
-    setCursorStack([]);
-    update({ ...values, discoverPage: null, libraryCursor: null });
+    updateResults({
+      ...values,
+      discoverPage: null,
+      libraryPage: null,
+      libraryCursor: null,
+    });
   };
 
   const changeTab = (nextTab: DiscoveryTab) => {
-    setCursorStack([]);
-    update({ discoverTab: nextTab, discoverPage: null, libraryCursor: null });
+    updateResults({
+      discoverTab: nextTab,
+      discoverPage: null,
+      libraryPage: null,
+      libraryCursor: null,
+    });
   };
 
   const changeScope = (nextDays: DiscoveryDays) => {
-    update({ discoverDays: String(nextDays), discoverPage: null });
+    updateResults({ discoverDays: String(nextDays), discoverPage: null });
   };
 
   const submitLibrarySearch = (event: FormEvent) => {
     event.preventDefault();
-    setCursorStack([]);
-    update({
+    updateResults({
       libraryQ: libraryDraft.trim() || null,
       libraryAuthor: authorDraft.trim() || null,
+      libraryPage: null,
       libraryCursor: null,
     });
   };
@@ -425,30 +454,16 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
   const clearFilters = () => {
     setLibraryDraft('');
     setAuthorDraft('');
-    setCursorStack([]);
-    update({
+    updateResults({
       discoverFriend: null,
       discoverTag: null,
       discoverSelf: null,
       discoverPage: null,
       libraryQ: null,
       libraryAuthor: null,
+      libraryPage: null,
       libraryCursor: null,
     });
-  };
-
-  const goToNextLibraryPage = () => {
-    const next = library.data?.next_cursor;
-    if (!next) return;
-    setCursorStack((current) => [...current, libraryCursor]);
-    update({ libraryCursor: next });
-  };
-
-  const goToPreviousLibraryPage = () => {
-    const previous = cursorStack.at(-1);
-    if (previous === undefined) return;
-    setCursorStack((current) => current.slice(0, -1));
-    update({ libraryCursor: previous || null });
   };
 
   const activeRankedWorlds = tab === 'rising' ? discovery.data?.rising : discovery.data?.hot;
@@ -459,6 +474,10 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
     ? null
     : Math.max(1, Math.ceil(activeRankingTotal / RANKING_PAGE_SIZE));
   const displayedRankingPageCount = rankingPageCount ?? Math.max(1, rankingPage + 1);
+  const libraryPageCount = library.data
+    ? Math.max(1, Math.ceil(library.data.total / LIBRARY_PAGE_SIZE))
+    : null;
+  const displayedLibraryPageCount = libraryPageCount ?? Math.max(1, libraryPage + 1);
   const scopeSummary = discoveryScopes.find((scope) => scope.days === days)?.summary ?? '近 7 天';
   const rankingFiltered = Boolean(friendId || worldTag || !includeSelf);
   const libraryFiltered = Boolean(friendId || worldTag || libraryQuery || libraryAuthor);
@@ -467,11 +486,34 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
 
   useEffect(() => {
     if (tab === 'library' || rankingPageCount === null || rankingPage < rankingPageCount) return;
-    update({ discoverPage: rankingPageCount > 1 ? rankingPageCount : null }, true);
-  }, [rankingPage, rankingPageCount, tab, update]);
+    updateResults({ discoverPage: rankingPageCount > 1 ? rankingPageCount : null }, true);
+  }, [rankingPage, rankingPageCount, tab, updateResults]);
+
+  useEffect(() => {
+    if (tab !== 'library' || libraryPageCount === null || libraryPage < libraryPageCount) return;
+    updateResults({ libraryPage: libraryPageCount > 1 ? libraryPageCount : null }, true);
+  }, [libraryPage, libraryPageCount, tab, updateResults]);
+
+  const activeResultsFetching = tab === 'library' ? library.isFetching : discovery.isFetching;
+  const currentResultsStateKey = resultsStateKey(parameters);
+  useEffect(() => {
+    if (
+      activeResultsFetching
+      || pendingResultsFocusKey.current !== currentResultsStateKey
+    ) return;
+    const heading = resultsHeadingRef.current;
+    if (!heading) return;
+    pendingResultsFocusKey.current = null;
+    heading.focus({ preventScroll: true });
+    heading.scrollIntoView?.({ behavior: 'auto', block: 'start' });
+  }, [activeResultsFetching, currentResultsStateKey]);
 
   const setRankingPage = (nextPage: number) => {
-    update({ discoverPage: nextPage > 0 ? nextPage + 1 : null });
+    updateResults({ discoverPage: nextPage > 0 ? nextPage + 1 : null });
+  };
+
+  const setLibraryPage = (nextPage: number) => {
+    updateResults({ libraryPage: nextPage > 0 ? nextPage + 1 : null });
   };
 
   return (
@@ -645,7 +687,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
         >
           <header className="panel-heading discovery-results-heading">
             <div>
-              <h2 id="discovery-content-title">
+              <h2 id="discovery-content-title" ref={resultsHeadingRef} tabIndex={-1}>
                 {tab === 'hot' ? '好友热门世界' : tab === 'rising' ? '最近上升' : '到访世界库'}
               </h2>
               <span aria-live="polite">
@@ -687,28 +729,14 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
                 <EmptyWorlds filtered={libraryFiltered} library />
               )}
 
-              {library.data && (cursorStack.length > 0 || Boolean(library.data.next_cursor)) && (
-                <nav className="discovery-library-pagination" aria-label="世界库分页">
-                  <button
-                    type="button"
-                    className="button button-secondary"
-                    disabled={!cursorStack.length || library.isFetching}
-                    onClick={goToPreviousLibraryPage}
-                  >
-                    <ArrowLeft size={16} aria-hidden="true" />
-                    上一页
-                  </button>
-                  <span aria-live="polite">{library.isFetching ? '正在翻页…' : '继续浏览世界库'}</span>
-                  <button
-                    type="button"
-                    className="button button-secondary"
-                    disabled={!library.data.next_cursor || library.isFetching}
-                    onClick={goToNextLibraryPage}
-                  >
-                    下一页
-                    <ArrowRight size={16} aria-hidden="true" />
-                  </button>
-                </nav>
+              {library.data && library.data.total > LIBRARY_PAGE_SIZE && (
+                <Pagination
+                  page={Math.min(libraryPage, displayedLibraryPageCount - 1)}
+                  pageCount={displayedLibraryPageCount}
+                  busy={library.isFetching}
+                  label="世界库"
+                  onPageChange={setLibraryPage}
+                />
               )}
             </>
           ) : (

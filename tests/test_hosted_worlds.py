@@ -215,6 +215,37 @@ class HostedWorldTests(unittest.TestCase):
         self.assertTrue(resolver.drain_once())
         self.assertEqual(len(fetcher.calls), 1)
 
+    def test_library_offset_takes_priority_and_cursor_remains_compatible(self):
+        observed_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        seed_event(
+            self.store,
+            self.tenant_id,
+            "usr_alice",
+            "world-enter-b",
+            observed_at,
+            "active",
+            f"{WORLD_B}:instance",
+        )
+        service = WorldService(self.store, WorldResolver(self.store, FakeWorldFetcher()))
+
+        first = service.library(self.tenant_id, limit=1)
+        cursor_page = service.library(
+            self.tenant_id,
+            cursor=first["next_cursor"],
+            limit=1,
+        )
+        offset_page = service.library(
+            self.tenant_id,
+            cursor=first["next_cursor"],
+            offset=0,
+            limit=1,
+        )
+
+        self.assertEqual(first["items"][0]["id"], WORLD_B)
+        self.assertEqual(cursor_page["items"][0]["id"], WORLD_ID)
+        self.assertEqual(offset_page["items"][0]["id"], WORLD_B)
+        self.assertEqual(offset_page["total"], 2)
+
     def test_duplicate_world_ids_queue_and_resolve_once(self):
         fetcher = FakeWorldFetcher()
         resolver = WorldResolver(self.store, fetcher)
@@ -440,6 +471,17 @@ class WorldHttpContractTests(unittest.TestCase):
         self.assertEqual(discovery.json()["rising_total"], 1)
         self.assertEqual(discovery.json()["limit"], 1)
         self.assertEqual(discovery.json()["offset"], 0)
+
+    def test_world_library_offset_is_optional_nonnegative_and_beats_cursor(self) -> None:
+        response = self.client.get(
+            "/v1/world-library",
+            params={"offset": 0, "cursor": "MQ", "limit": 1},
+        )
+        invalid = self.client.get("/v1/world-library", params={"offset": -1})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["items"][0]["id"], WORLD_ID)
+        self.assertEqual(invalid.status_code, 422, invalid.text)
 
 
 class DiscoveryTests(unittest.TestCase):

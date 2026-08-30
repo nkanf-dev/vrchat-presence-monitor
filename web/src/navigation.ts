@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 export const areas = ['online', 'people', 'analysis', 'more'] as const;
 export type Area = (typeof areas)[number];
@@ -45,6 +45,73 @@ const legacyRoutes: Record<string, Route> = {
 
 const readHash = () => window.location.hash.replace(/^#/, '');
 const HASH_PARAMETERS_CHANGED = 'presence-monitor:hash-parameters-changed';
+const DETAIL_HISTORY_STATE_KEY = '__presenceMonitorDetailEntry';
+const DETAIL_HISTORY_BASE_STATE_KEY = '__presenceMonitorDetailBaseState';
+
+export type DetailHistoryType = 'person' | 'world';
+
+export type DetailHistoryMarker = {
+  type: DetailHistoryType;
+  id: string;
+};
+
+type HashParameterPatch = Record<string, string | number | null>;
+
+const detailParameterKey: Record<DetailHistoryType, 'personDetail' | 'worldDetail'> = {
+  person: 'personDetail',
+  world: 'worldDetail',
+};
+
+const isStateRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+export function getDetailHistoryMarker(
+  state: unknown = window.history.state,
+): DetailHistoryMarker | null {
+  if (!isStateRecord(state)) return null;
+  const marker = state[DETAIL_HISTORY_STATE_KEY];
+  if (!isStateRecord(marker)) return null;
+  const { type, id } = marker;
+  if ((type !== 'person' && type !== 'world') || typeof id !== 'string' || !id) return null;
+  return { type, id };
+}
+
+const withoutDetailHistoryMarker = (state: unknown) => {
+  if (!isStateRecord(state) || !getDetailHistoryMarker(state)) return state;
+  if (DETAIL_HISTORY_BASE_STATE_KEY in state) {
+    return state[DETAIL_HISTORY_BASE_STATE_KEY] ?? null;
+  }
+  const next = { ...state };
+  delete next[DETAIL_HISTORY_STATE_KEY];
+  return Object.keys(next).length ? next : null;
+};
+
+const withDetailHistoryMarker = (type: DetailHistoryType, id: string) => {
+  const base = withoutDetailHistoryMarker(window.history.state);
+  const marker: DetailHistoryMarker = { type, id };
+  if (isStateRecord(base)) return { ...base, [DETAIL_HISTORY_STATE_KEY]: marker };
+  return {
+    [DETAIL_HISTORY_BASE_STATE_KEY]: base,
+    [DETAIL_HISTORY_STATE_KEY]: marker,
+  };
+};
+
+const applyHashPatch = (parameters: URLSearchParams, values: HashParameterPatch) => {
+  for (const [key, value] of Object.entries(values)) {
+    if (value === null || value === '') parameters.delete(key);
+    else parameters.set(key, String(value));
+  }
+};
+
+export function isCurrentDetailHistoryEntry(
+  type: DetailHistoryType,
+  id: string,
+  state: unknown = window.history.state,
+  parameters = new URLSearchParams(readHash()),
+) {
+  const marker = getDetailHistoryMarker(state);
+  return marker?.type === type && marker.id === id && parameters.get(detailParameterKey[type]) === id;
+}
 
 const routeDetails = (parameters: URLSearchParams): RouteDetails => {
   const details: RouteDetails = {};
@@ -181,9 +248,13 @@ const replaceScrollPosition = (value: number, key: string) => {
 
 export function useHashParameters() {
   const [serialized, setSerialized] = useState(readHash);
+  const pendingDetailBack = useRef<string | null>(null);
 
   useEffect(() => {
-    const updateFromLocation = () => setSerialized(readHash());
+    const updateFromLocation = () => {
+      pendingDetailBack.current = null;
+      setSerialized(readHash());
+    };
     window.addEventListener('hashchange', updateFromLocation);
     window.addEventListener('popstate', updateFromLocation);
     window.addEventListener(HASH_PARAMETERS_CHANGED, updateFromLocation);
@@ -200,30 +271,81 @@ export function useHashParameters() {
     if (nextSerialized === readHash()) return;
     if (replace) {
       window.history.replaceState(window.history.state, '', hashUrl(nextSerialized));
-      setSerialized(nextSerialized);
-      window.dispatchEvent(new Event(HASH_PARAMETERS_CHANGED));
     } else {
-      window.location.hash = nextSerialized;
+      window.history.pushState(
+        withoutDetailHistoryMarker(window.history.state),
+        '',
+        hashUrl(nextSerialized),
+      );
     }
+    setSerialized(nextSerialized);
+    window.dispatchEvent(new Event(HASH_PARAMETERS_CHANGED));
   }, []);
 
   const update = useCallback(
-    (values: Record<string, string | number | null>, replace = false) => {
+    (values: HashParameterPatch, replace = false) => {
       const next = new URLSearchParams(readHash());
-      for (const [key, value] of Object.entries(values)) {
-        if (value === null || value === '') next.delete(key);
-        else next.set(key, String(value));
-      }
-      setParameters(next, replace);
+      applyHashPatch(next, values);
+      const keys = Object.keys(values);
+      const detailLocalUpdate =
+        keys.length > 0 &&
+        Boolean(next.get('personDetail')) &&
+        keys.every((key) => key === 'personTab' || key === 'personFrom' || key === 'personTo');
+      setParameters(next, replace || detailLocalUpdate);
     },
     [setParameters],
   );
 
-  return { parameters, update, setParameters };
+  const openDetail = useCallback(
+    (type: DetailHistoryType, id: string, values: HashParameterPatch = {}) => {
+      const normalizedId = id.trim();
+      if (!normalizedId) return;
+      const next = new URLSearchParams(readHash());
+      next.set(detailParameterKey[type], normalizedId);
+      applyHashPatch(next, values);
+      const nextSerialized = next.toString();
+      if (
+        nextSerialized === readHash() &&
+        isCurrentDetailHistoryEntry(type, normalizedId)
+      ) {
+        return;
+      }
+      window.history.pushState(
+        withDetailHistoryMarker(type, normalizedId),
+        '',
+        hashUrl(nextSerialized),
+      );
+      setSerialized(nextSerialized);
+      window.dispatchEvent(new Event(HASH_PARAMETERS_CHANGED));
+    },
+    [],
+  );
+
+  const closeDetail = useCallback(
+    (type: DetailHistoryType, id: string, values: HashParameterPatch = {}) => {
+      const normalizedId = id.trim();
+      const current = new URLSearchParams(readHash());
+      if (!normalizedId || current.get(detailParameterKey[type]) !== normalizedId) return 'noop' as const;
+      if (isCurrentDetailHistoryEntry(type, normalizedId, window.history.state, current)) {
+        const pendingKey = `${type}:${normalizedId}`;
+        if (pendingDetailBack.current === pendingKey) return 'back-pending' as const;
+        pendingDetailBack.current = pendingKey;
+        window.history.back();
+        return 'back' as const;
+      }
+      current.delete(detailParameterKey[type]);
+      applyHashPatch(current, values);
+      setParameters(current, true);
+      return 'replace' as const;
+    },
+    [setParameters],
+  );
+
+  return { parameters, update, setParameters, openDetail, closeDetail };
 }
 
 export function useHashRoute() {
-  const { parameters, setParameters, update } = useHashParameters();
+  const { parameters, setParameters, update, openDetail, closeDetail } = useHashParameters();
   const route = useMemo(() => parseRoute(parameters), [parameters]);
   const currentRouteKey = routeKey(route);
 
@@ -260,6 +382,8 @@ export function useHashRoute() {
   return {
     parameters,
     update,
+    openDetail,
+    closeDetail,
     route,
     routeKey: currentRouteKey,
     view: routeToView(route),

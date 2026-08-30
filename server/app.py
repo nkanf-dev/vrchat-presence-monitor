@@ -585,6 +585,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         friend_id: str = Query(default="", max_length=128),
         world_tag: str = Query(default="", max_length=160),
         cursor: str = Query(default="", max_length=256),
+        offset: int | None = Query(default=None, ge=0),
         limit: int = Query(default=50, ge=1, le=100),
         auth: Authenticated = Depends(viewer),
     ) -> dict[str, Any]:
@@ -596,6 +597,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 friend_id=friend_id,
                 world_tag=world_tag,
                 cursor=cursor,
+                offset=offset,
                 limit=limit,
             )
         except KeyError as error:

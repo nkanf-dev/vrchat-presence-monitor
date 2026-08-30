@@ -461,18 +461,22 @@ class WorldService:
         friend_id: str = "",
         world_tag: str = "",
         cursor: str = "",
+        offset: int | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
         page_size = max(1, min(int(limit), 100))
-        try:
-            offset = (
-                int(base64.urlsafe_b64decode(cursor + "===").decode())
-                if cursor
-                else 0
-            )
-        except (ValueError, UnicodeDecodeError):
-            raise ValueError("分页位置无效") from None
-        offset = max(0, offset)
+        if offset is None:
+            try:
+                page_offset = (
+                    int(base64.urlsafe_b64decode(cursor + "===").decode())
+                    if cursor
+                    else 0
+                )
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError("分页位置无效") from None
+        else:
+            page_offset = int(offset)
+        page_offset = max(0, page_offset)
         rows = self._observed_world_rows(tenant_id, friend_id=friend_id)
 
         items: list[dict[str, Any]] = []
@@ -510,7 +514,7 @@ class WorldService:
                 }
             )
 
-        raw_page = items[offset : offset + page_size]
+        raw_page = items[page_offset : page_offset + page_size]
         page = [
             {
                 **self._presentation(tenant_id, item["world_id"]),
@@ -519,7 +523,7 @@ class WorldService:
             }
             for item in raw_page
         ]
-        next_offset = offset + len(raw_page)
+        next_offset = page_offset + len(raw_page)
         next_cursor = (
             base64.urlsafe_b64encode(str(next_offset).encode()).decode().rstrip("=")
             if next_offset < len(items)
