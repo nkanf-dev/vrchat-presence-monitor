@@ -7,8 +7,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from fastapi.testclient import TestClient
+
 from vrchat_monitor.vrchat import VRChatError
 
+from server.app import create_app
+from server.settings import Settings
 from server.storage import Store
 from server.worlds import DiscoveryService, WorldResolver, WorldService
 
@@ -346,6 +350,89 @@ class HostedWorldTests(unittest.TestCase):
         self.assertEqual(fetcher.calls, [])
 
 
+class WorldHttpContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        static_dir = root / "static"
+        static_dir.mkdir()
+        (static_dir / "index.html").write_text(
+            "<!doctype html><html><body></body></html>", encoding="utf-8"
+        )
+        self.settings = Settings(
+            data_dir=root,
+            static_dir=static_dir,
+            bootstrap_token="bootstrap-secret",
+            cookie_secure="never",
+        )
+        self.store = Store(str(root / "hosted.sqlite3"))
+        created = self.store.bootstrap("World API", "collector")
+        self.tenant_id = created["tenant_id"]
+        observed_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+        seed_friend(
+            self.store,
+            self.tenant_id,
+            "usr_world_api",
+            "World API Friend",
+            updated_at=observed_at,
+        )
+        seed_tracking(
+            self.store,
+            self.tenant_id,
+            "usr_world_api",
+            observed_at - timedelta(minutes=1),
+        )
+        seed_coverage_pair(self.store, self.tenant_id, observed_at)
+        seed_event(
+            self.store,
+            self.tenant_id,
+            "usr_world_api",
+            "world-api-enter",
+            observed_at,
+            "active",
+            f"{WORLD_ID}:instance",
+        )
+        self.store.world_cache_put(
+            WORLD_ID,
+            {
+                "id": WORLD_ID,
+                "name": "Tagged World",
+                "tags": ["author_tag_social", "system_approved"],
+            },
+        )
+        self.client = TestClient(create_app(self.settings, self.store))
+        self.addCleanup(self.client.close)
+        login = self.client.post(
+            "/v1/login",
+            headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"},
+            json={"access_code": created["access_code"]},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+
+    def test_world_tag_contract_filters_library_and_discovery(self) -> None:
+        tags = self.client.get("/v1/world-tags")
+        library = self.client.get(
+            "/v1/world-library", params={"world_tag": "author_tag_social"}
+        )
+        discovery = self.client.get(
+            "/v1/discovery/worlds",
+            params={"days": 7, "world_tag": "author_tag_social"},
+        )
+
+        self.assertEqual(
+            tags.json(),
+            [
+                {"name": "author_tag_social", "count": 1},
+                {"name": "system_approved", "count": 1},
+            ],
+        )
+        self.assertEqual(library.status_code, 200, library.text)
+        self.assertEqual(library.json()["items"][0]["id"], WORLD_ID)
+        self.assertEqual(discovery.status_code, 200, discovery.text)
+        self.assertEqual(discovery.json()["hot"][0]["world_id"], WORLD_ID)
+
+
 class DiscoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -368,6 +455,52 @@ class DiscoveryTests(unittest.TestCase):
             fetcher,
             resolver,
         )
+
+    def test_observation_migration_invalidates_an_empty_discovery_cache(self):
+        tenant_id = self.create_tenant("migrated-evidence")
+        event_time = self.current - timedelta(days=1)
+        seed_friend(
+            self.store,
+            tenant_id,
+            "usr_migrated",
+            "Migrated Friend",
+            updated_at=event_time,
+        )
+        seed_event(
+            self.store,
+            tenant_id,
+            "usr_migrated",
+            "migrated-enter",
+            event_time,
+            "active",
+            f"{WORLD_ID}:instance",
+        )
+        seed_event(
+            self.store,
+            tenant_id,
+            "usr_migrated",
+            "migrated-leave",
+            event_time + timedelta(minutes=3),
+            "offline",
+            "offline",
+        )
+        discovery, _, _ = self.service()
+
+        self.assertEqual(discovery.discover(tenant_id, 7)["hot"], [])
+
+        seed_tracking(
+            self.store,
+            tenant_id,
+            "usr_migrated",
+            event_time - timedelta(minutes=1),
+        )
+        seed_coverage_pair(self.store, tenant_id, event_time)
+        migrated = discovery.discover(tenant_id, 7)
+
+        self.assertEqual(
+            [item["world_id"] for item in migrated["hot"]], [WORLD_ID]
+        )
+        self.assertEqual(migrated["hot"][0]["minutes"], 3.0)
 
     def test_private_hidden_and_gap_time_do_not_become_world_time(self):
         tenant_id = self.create_tenant("coverage")
@@ -599,7 +732,7 @@ class DiscoveryTests(unittest.TestCase):
             first["ranking"]["hot"][0], "unique_people:desc"
         )
 
-    def test_filters_are_tenant_scoped_and_self_can_be_excluded(self):
+    def test_friend_and_world_tag_filters_are_scoped_and_self_can_be_excluded(self):
         tenant_id = self.create_tenant("filters")
         event_time = self.current - timedelta(days=1)
         seed_friend(
@@ -661,18 +794,22 @@ class DiscoveryTests(unittest.TestCase):
             "offline",
             "offline",
         )
-        stamp = as_text(event_time)
-        with self.store.lock, self.store.connection() as db:
-            db.execute(
-                """INSERT INTO tags(tenant_id,id,name,color,created_at,updated_at)
-                VALUES(?,?,'Regulars','#88cc44',?,?)""",
-                (tenant_id, "tag_regulars", stamp, stamp),
-            )
-            db.execute(
-                """INSERT INTO friend_tags(tenant_id,friend_id,tag_id,created_at)
-                VALUES(?,?,?,?)""",
-                (tenant_id, "usr_friend", "tag_regulars", stamp),
-            )
+        self.store.world_cache_put(
+            WORLD_B,
+            {
+                "id": WORLD_B,
+                "name": "Social World",
+                "tags": ["author_tag_social", "system_approved"],
+            },
+        )
+        self.store.world_cache_put(
+            WORLD_C,
+            {
+                "id": WORLD_C,
+                "name": "Game World",
+                "tags": ["author_tag_game", "system_approved"],
+            },
+        )
 
         other_tenant = self.create_tenant("other")
         seed_friend(
@@ -682,16 +819,11 @@ class DiscoveryTests(unittest.TestCase):
             "Other",
             updated_at=event_time,
         )
-        with self.store.lock, self.store.connection() as db:
-            db.execute(
-                """INSERT INTO tags(tenant_id,id,name,color,created_at,updated_at)
-                VALUES(?,?,'Other tag','#888888',?,?)""",
-                (other_tenant, "tag_other", stamp, stamp),
-            )
-
         discovery, fetcher, resolver = self.service()
         without_self = discovery.discover(tenant_id, 7, include_self=False)
-        tagged = discovery.discover(tenant_id, 7, tag_id="tag_regulars")
+        tagged = discovery.discover(
+            tenant_id, 7, world_tag="author_tag_social"
+        )
         only_self = discovery.discover(tenant_id, 7, friend_id="usr_self")
 
         self.assertEqual(
@@ -705,14 +837,24 @@ class DiscoveryTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             discovery.discover(tenant_id, 7, friend_id="usr_other")
-        with self.assertRaises(KeyError):
-            discovery.discover(tenant_id, 7, tag_id="tag_other")
 
         library = WorldService(self.store, resolver)
         with self.assertRaises(KeyError):
             library.library(tenant_id, friend_id="usr_other")
-        with self.assertRaises(KeyError):
-            library.library(tenant_id, tag_id="tag_other")
+        tagged_library = library.library(
+            tenant_id, world_tag="author_tag_social"
+        )
+        self.assertEqual(
+            [item["id"] for item in tagged_library["items"]], [WORLD_B]
+        )
+        self.assertEqual(
+            library.tags(tenant_id),
+            [
+                {"name": "system_approved", "count": 2},
+                {"name": "author_tag_game", "count": 1},
+                {"name": "author_tag_social", "count": 1},
+            ],
+        )
         self.assertEqual(fetcher.calls, [])
 
     def test_discovery_accepts_only_product_ranges(self):

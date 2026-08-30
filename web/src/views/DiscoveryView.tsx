@@ -18,7 +18,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getDiscovery,
   getFriends,
-  getTags,
+  getWorldTags,
   getWorldLibrary,
   worldImageUrl,
 } from '../api';
@@ -26,7 +26,7 @@ import type {
   DiscoveryWorld,
   Friend,
   RisingWorld,
-  Tag,
+  WorldTag,
   WorldLibraryItem,
 } from '../api';
 import { friendName } from '../format';
@@ -302,7 +302,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
   const tab: DiscoveryTab = isDiscoveryTab(requestedTab) ? requestedTab : 'hot';
   const days = selectedDays(parameters.get('discoverDays'));
   const friendId = parameters.get('discoverFriend') ?? '';
-  const tagId = parameters.get('discoverTag') ?? '';
+  const worldTag = parameters.get('discoverTag') ?? '';
   const includeSelf = parameters.get('discoverSelf') !== '0';
   const libraryQuery = parameters.get('libraryQ') ?? '';
   const libraryAuthor = parameters.get('libraryAuthor') ?? '';
@@ -328,30 +328,30 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
     queryFn: () => getFriends({ limit: 200, offset: 0 }),
     staleTime: 5 * 60_000,
   });
-  const tags = useQuery({
-    queryKey: ['tags'],
-    queryFn: getTags,
+  const worldTags = useQuery({
+    queryKey: ['world-tags'],
+    queryFn: getWorldTags,
     staleTime: 5 * 60_000,
   });
   const discovery = useQuery({
-    queryKey: ['discovery', days, friendId, tagId, includeSelf],
+    queryKey: ['discovery', days, friendId, worldTag, includeSelf],
     queryFn: () => getDiscovery({
       days,
       includeSelf,
       ...(friendId ? { friendId } : {}),
-      ...(tagId ? { tagId } : {}),
+      ...(worldTag ? { worldTag } : {}),
     }),
     enabled: tab !== 'library',
     placeholderData: keepPreviousData,
     staleTime: 60_000,
   });
   const library = useQuery({
-    queryKey: ['world-library', libraryQuery, libraryAuthor, friendId, tagId, libraryCursor],
+    queryKey: ['world-library', libraryQuery, libraryAuthor, friendId, worldTag, libraryCursor],
     queryFn: () => getWorldLibrary({
       query: libraryQuery,
       author: libraryAuthor,
       friendId,
-      tagId,
+      worldTag,
       cursor: libraryCursor,
       limit: 36,
     }),
@@ -366,9 +366,14 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
     ),
     [friends.data?.items],
   );
-  const sortedTags = useMemo(
-    () => [...(tags.data ?? [])].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')),
-    [tags.data],
+  const sortedWorldTags = useMemo(
+    () => [...(worldTags.data ?? [])].sort((left, right) => (
+      right.count - left.count || left.name.localeCompare(right.name, 'zh-CN')
+    )),
+    [worldTags.data],
+  );
+  const selectedWorldTagMissing = Boolean(
+    worldTag && worldTags.data && !worldTags.data.some((tag) => tag.name === worldTag),
   );
 
   const changeSharedFilter = (values: Record<string, string | null>) => {
@@ -415,9 +420,10 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
   };
 
   const activeRankedWorlds = tab === 'rising' ? discovery.data?.rising : discovery.data?.hot;
-  const rankingFiltered = Boolean(friendId || tagId || !includeSelf);
-  const libraryFiltered = Boolean(friendId || tagId || libraryQuery || libraryAuthor);
-  const filtersUnavailable = (friends.isError && !friends.data) || (tags.isError && !tags.data);
+  const rankingFiltered = Boolean(friendId || worldTag || !includeSelf);
+  const libraryFiltered = Boolean(friendId || worldTag || libraryQuery || libraryAuthor);
+  const filtersUnavailable = (friends.isError && !friends.data)
+    || (worldTags.isError && !worldTags.data);
 
   return (
     <>
@@ -511,13 +517,27 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
             <label className="select-control">
               <span>标签</span>
               <select
-                value={tagId}
+                value={worldTag}
                 onChange={(event) => changeSharedFilter({ discoverTag: event.target.value || null })}
-                disabled={tags.isPending && !tags.data}
+                disabled={(worldTags.isPending && !worldTags.data)
+                  || worldTags.data?.length === 0}
               >
-                <option value="">全部标签</option>
-                {sortedTags.map((tag: Tag) => (
-                  <option key={tag.id} value={tag.id}>{tag.name}</option>
+                <option value="">
+                  {worldTags.isPending && !worldTags.data
+                    ? '正在加载世界标签…'
+                    : worldTags.isError && !worldTags.data
+                      ? '世界标签加载失败'
+                      : worldTags.data?.length === 0
+                        ? '暂无世界标签'
+                        : '全部世界标签'}
+                </option>
+                {selectedWorldTagMissing && (
+                  <option value={worldTag}>{worldTag}</option>
+                )}
+                {sortedWorldTags.map((tag: WorldTag) => (
+                  <option key={tag.name} value={tag.name}>
+                    {tag.name}（{tag.count.toLocaleString('zh-CN')}）
+                  </option>
                 ))}
               </select>
             </label>
@@ -566,7 +586,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
               message="部分筛选项暂时没有加载出来。"
               onRetry={() => {
                 void friends.refetch();
-                void tags.refetch();
+                void worldTags.refetch();
               }}
             />
           )}

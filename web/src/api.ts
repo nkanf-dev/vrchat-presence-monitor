@@ -288,6 +288,11 @@ const tagSchema = z.object({
   friend_count: z.number().int().nonnegative().optional(),
 });
 
+const worldTagSchema = z.object({
+  name: z.string(),
+  count: z.number().int().nonnegative(),
+});
+
 const annotationSchema = z.object({
   friend_id: z.string(),
   note: z.string(),
@@ -480,6 +485,7 @@ export type WorldSpan = z.infer<typeof worldSpanSchema>;
 export type WorldInfo = z.infer<typeof worldInfoSchema>;
 export type Coverage = z.infer<typeof standaloneCoverageSchema>;
 export type Tag = z.infer<typeof tagSchema>;
+export type WorldTag = z.infer<typeof worldTagSchema>;
 export type Annotation = z.infer<typeof annotationSchema>;
 export type FriendInsight = z.infer<typeof friendInsightSchema>;
 export type SearchResults = z.infer<typeof searchSchema>;
@@ -792,6 +798,8 @@ export const updateFriendAnnotation = (
 
 export const getTags = () => request('/v1/tags', z.array(tagSchema));
 
+export const getWorldTags = () => request('/v1/world-tags', z.array(worldTagSchema));
+
 export const createTag = (value: Pick<Tag, 'name' | 'color'>) =>
   request('/v1/tags', tagSchema, {
     method: 'POST',
@@ -837,6 +845,8 @@ export const getWorldLibrary = (options: {
   query?: string;
   author?: string;
   friendId?: string;
+  worldTag?: string;
+  /** @deprecated Use worldTag. */
   tagId?: string;
   cursor?: string;
   limit?: number;
@@ -845,7 +855,8 @@ export const getWorldLibrary = (options: {
   if (options.query) parameters.set('q', options.query);
   if (options.author) parameters.set('author', options.author);
   if (options.friendId) parameters.set('friend_id', options.friendId);
-  if (options.tagId) parameters.set('tag_id', options.tagId);
+  const worldTag = options.worldTag ?? options.tagId;
+  if (worldTag) parameters.set('world_tag', worldTag);
   if (options.cursor) parameters.set('cursor', options.cursor);
   return request(`/v1/world-library?${parameters}`, worldLibrarySchema);
 };
@@ -853,6 +864,8 @@ export const getWorldLibrary = (options: {
 export const getDiscovery = (options: {
   days?: 7 | 30;
   friendId?: string;
+  worldTag?: string;
+  /** @deprecated Use worldTag. */
   tagId?: string;
   includeSelf?: boolean;
 } = {}) => {
@@ -861,7 +874,8 @@ export const getDiscovery = (options: {
     include_self: String(options.includeSelf ?? true),
   });
   if (options.friendId) parameters.set('friend_id', options.friendId);
-  if (options.tagId) parameters.set('tag_id', options.tagId);
+  const worldTag = options.worldTag ?? options.tagId;
+  if (worldTag) parameters.set('world_tag', worldTag);
   return request(`/v1/discovery/worlds?${parameters}`, discoverySchema);
 };
 

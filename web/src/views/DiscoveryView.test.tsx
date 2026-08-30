@@ -8,7 +8,7 @@ import { DiscoveryView } from './DiscoveryView';
 const api = vi.hoisted(() => ({
   getDiscovery: vi.fn(),
   getFriends: vi.fn(),
-  getTags: vi.fn(),
+  getWorldTags: vi.fn(),
   getWorldLibrary: vi.fn(),
 }));
 
@@ -113,7 +113,7 @@ describe('DiscoveryView', () => {
       limit: 200,
       offset: 0,
     });
-    api.getTags.mockResolvedValue([{ id: 'tag_friends', name: '常一起玩', color: '#9bd861' }]);
+    api.getWorldTags.mockResolvedValue([{ name: 'author_tag_social', count: 12 }]);
     api.getDiscovery.mockResolvedValue(discoveryResult);
     api.getWorldLibrary.mockResolvedValue(libraryResult);
   });
@@ -124,7 +124,7 @@ describe('DiscoveryView', () => {
   });
 
   it('passes hash filters to discovery and opens a world without losing timeline state', async () => {
-    window.location.hash = '#area=analysis&section=discover&day=2026-08-21&discoverDays=30&discoverFriend=usr_alice&discoverTag=tag_friends&discoverSelf=0';
+    window.location.hash = '#area=analysis&section=discover&day=2026-08-21&discoverDays=30&discoverFriend=usr_alice&discoverTag=author_tag_social&discoverSelf=0';
     const onOpenWorld = vi.fn();
     renderView(onOpenWorld);
 
@@ -132,7 +132,7 @@ describe('DiscoveryView', () => {
     expect(api.getDiscovery).toHaveBeenCalledWith({
       days: 30,
       friendId: 'usr_alice',
-      tagId: 'tag_friends',
+      worldTag: 'author_tag_social',
       includeSelf: false,
     });
 
@@ -146,11 +146,11 @@ describe('DiscoveryView', () => {
     expect(target.get('world')).toBe('wrld_coffee');
     expect(target.get('person')).toBe('usr_alice');
     expect(target.get('day')).toBe('2026-08-21');
-    expect(target.get('discoverTag')).toBe('tag_friends');
+    expect(target.get('discoverTag')).toBe('author_tag_social');
   });
 
   it('keeps tab and filter state in the hash when opening the world library', async () => {
-    window.location.hash = '#area=analysis&section=discover&day=2026-08-20&discoverDays=30&discoverTag=tag_friends';
+    window.location.hash = '#area=analysis&section=discover&day=2026-08-20&discoverDays=30&discoverTag=author_tag_social';
     renderView();
 
     await screen.findByText('Coffee House');
@@ -161,13 +161,47 @@ describe('DiscoveryView', () => {
       const parameters = new URLSearchParams(window.location.hash.slice(1));
       expect(parameters.get('discoverTab')).toBe('library');
       expect(parameters.get('discoverDays')).toBe('30');
-      expect(parameters.get('discoverTag')).toBe('tag_friends');
+      expect(parameters.get('discoverTag')).toBe('author_tag_social');
       expect(parameters.get('day')).toBe('2026-08-20');
     });
     expect(api.getWorldLibrary).toHaveBeenCalledWith(expect.objectContaining({
-      tagId: 'tag_friends',
+      worldTag: 'author_tag_social',
       limit: 36,
     }));
+  });
+
+  it('shows world-tag counts and keeps the selected tag in the hash', async () => {
+    renderView();
+
+    const tagSelect = await screen.findByRole('combobox', { name: '标签' });
+    expect(await screen.findByRole('option', { name: 'author_tag_social（12）' })).toBeVisible();
+
+    await userEvent.selectOptions(tagSelect, 'author_tag_social');
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.hash.slice(1)).get('discoverTag'))
+        .toBe('author_tag_social');
+    });
+    expect(api.getDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
+      worldTag: 'author_tag_social',
+    }));
+  });
+
+  it('shows an explicit empty state when no world tags exist', async () => {
+    api.getWorldTags.mockResolvedValue([]);
+    renderView();
+
+    const tagSelect = await screen.findByRole('combobox', { name: '标签' });
+    expect(await screen.findByRole('option', { name: '暂无世界标签' })).toBeVisible();
+    expect(tagSelect).toBeDisabled();
+  });
+
+  it('shows that world tags are loading', async () => {
+    api.getWorldTags.mockReturnValue(new Promise(() => undefined));
+    renderView();
+
+    const tagSelect = await screen.findByRole('combobox', { name: '标签' });
+    expect(tagSelect).toBeDisabled();
+    expect(screen.getByRole('option', { name: '正在加载世界标签…' })).toBeVisible();
   });
 
   it('shows a useful empty state for a filtered result', async () => {

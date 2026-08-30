@@ -43,20 +43,14 @@ export function ChartViewport({
   children: ReactNode;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
-  const hourTrack = useRef<HTMLDivElement>(null);
   const frame = useRef<number | null>(null);
   const [showTouchHint, setShowTouchHint] = useState(false);
-
-  const synchronizeHeader = (left: number) => {
-    if (hourTrack.current) hourTrack.current.style.transform = `translate3d(${-left}px, 0, 0)`;
-  };
 
   useLayoutEffect(() => {
     const element = viewport.current;
     if (!element) return;
     const restore = () => {
       element.scrollLeft = hashNumber(routeKey);
-      synchronizeHeader(element.scrollLeft);
     };
     window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
   }, [routeKey]);
@@ -76,13 +70,8 @@ export function ChartViewport({
   const remember = (event: UIEvent<HTMLDivElement>) => {
     if (frame.current !== null) window.cancelAnimationFrame(frame.current);
     const left = event.currentTarget.scrollLeft;
-    synchronizeHeader(left);
     frame.current = window.requestAnimationFrame(() => replaceHashNumber(routeKey, left));
   };
-
-  const plotWidth = stickyContext
-    ? stickyContext.width - stickyContext.plotLeft - stickyContext.plotRight
-    : 0;
 
   return (
     <div className="chart-viewport-block">
@@ -93,25 +82,6 @@ export function ChartViewport({
         </div>
       )}
       <div className="chart-frame">
-        {stickyContext && (
-          <div className="chart-sticky-hours" aria-hidden="true">
-            <div
-              className="chart-sticky-hours-track"
-              ref={hourTrack}
-              style={{ width: stickyContext.width }}
-            >
-              {Array.from({ length: 24 }, (_, hour) => {
-                const offset = stickyContext.hourPosition === 'center' ? hour + 0.5 : hour;
-                const left = stickyContext.plotLeft + (plotWidth * offset) / 24;
-                return (
-                  <span key={hour} style={{ left }}>
-                    {String(hour).padStart(2, '0')}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-        )}
         <div className="chart-viewport" ref={viewport} onScroll={remember} tabIndex={0} aria-label={label}>
           {children}
         </div>

@@ -583,7 +583,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         q: str = Query(default="", max_length=160),
         author: str = Query(default="", max_length=160),
         friend_id: str = Query(default="", max_length=128),
-        tag_id: str = Query(default="", max_length=128),
+        world_tag: str = Query(default="", max_length=160),
         cursor: str = Query(default="", max_length=256),
         limit: int = Query(default=50, ge=1, le=100),
         auth: Authenticated = Depends(viewer),
@@ -594,7 +594,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 query=q,
                 author=author,
                 friend_id=friend_id,
-                tag_id=tag_id,
+                world_tag=world_tag,
                 cursor=cursor,
                 limit=limit,
             )
@@ -603,11 +603,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @app.get("/v1/world-tags")
+    def world_tags(
+        friend_id: str = Query(default="", max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> list[dict[str, Any]]:
+        try:
+            return worlds.tags(auth.row["tenant_id"], friend_id=friend_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="not found") from error
+
     @app.get("/v1/discovery/worlds")
     def discover_worlds(
         days: int = Query(default=7),
         friend_id: str = Query(default="", max_length=128),
-        tag_id: str = Query(default="", max_length=128),
+        world_tag: str = Query(default="", max_length=160),
         include_self: bool = Query(default=True),
         auth: Authenticated = Depends(viewer),
     ) -> dict[str, Any]:
@@ -615,9 +625,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             return discovery.discover(
                 auth.row["tenant_id"],
                 days,
-                friend_id,
-                tag_id,
-                include_self,
+                friend_id=friend_id,
+                world_tag=world_tag,
+                include_self=include_self,
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="not found") from error

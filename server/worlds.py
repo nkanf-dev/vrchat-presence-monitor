@@ -77,6 +77,27 @@ def normalize_world(world_id: str, raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def world_metadata_tags(raw: dict[str, Any] | None) -> tuple[str, ...]:
+    """Return stable, unique VRChat metadata tags from a cached world payload."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("tags"), list):
+        return ()
+    unique: dict[str, str] = {}
+    for value in raw["tags"]:
+        if not isinstance(value, str):
+            continue
+        name = value.strip()
+        if name:
+            unique.setdefault(name.casefold(), name)
+    return tuple(sorted(unique.values(), key=str.casefold))
+
+
+def world_has_metadata_tag(raw: dict[str, Any] | None, selected: str) -> bool:
+    folded = str(selected or "").strip().casefold()
+    return not folded or any(
+        name.casefold() == folded for name in world_metadata_tags(raw)
+    )
+
+
 class WorldResolver:
     def __init__(
         self,
@@ -299,20 +320,12 @@ def _require_filter_ids(
     tenant_id: str,
     *,
     friend_id: str = "",
-    tag_id: str = "",
 ) -> None:
     if friend_id and db.execute(
         "SELECT 1 FROM friends WHERE tenant_id=? AND id=?",
         (tenant_id, friend_id),
     ).fetchone() is None:
         raise KeyError("friend not found")
-    if tag_id and db.execute(
-        "SELECT 1 FROM tags WHERE tenant_id=? AND id=?",
-        (tenant_id, tag_id),
-    ).fetchone() is None:
-        raise KeyError("tag not found")
-
-
 def _public_resolution_status(state: dict[str, Any] | None) -> str:
     if state and (
         str(state.get("outcome") or "") == "unavailable"
@@ -383,6 +396,62 @@ class WorldService:
             raise KeyError("world not observed")
         return self._presentation(tenant_id, normalized)
 
+    def _observed_world_rows(
+        self,
+        tenant_id: str,
+        *,
+        friend_id: str = "",
+    ) -> list[dict[str, Any]]:
+        expression = self._world_expression("e.location")
+        clauses = [
+            "e.tenant_id=?",
+            "e.location GLOB 'wrld_*'",
+            """NOT EXISTS(SELECT 1 FROM event_anomalies a
+            WHERE a.tenant_id=e.tenant_id AND a.event_kind='status_event'
+              AND a.event_id=e.client_event_id)""",
+        ]
+        params: list[Any] = [tenant_id]
+        if friend_id:
+            clauses.append("e.friend_id=?")
+            params.append(friend_id)
+        with self.store.lock, self.store.connection() as db:
+            self.store._require_tenant(db, tenant_id)
+            _require_filter_ids(db, tenant_id, friend_id=friend_id)
+            return [
+                dict(row)
+                for row in db.execute(
+                    f"""SELECT {expression} AS world_id,
+                    MAX(e.occurred_at) AS last_observed,COUNT(*) AS event_count
+                    FROM status_events e WHERE {' AND '.join(clauses)}
+                    GROUP BY world_id ORDER BY last_observed DESC,world_id
+                    LIMIT 5000""",
+                    params,
+                ).fetchall()
+            ]
+
+    def tags(
+        self,
+        tenant_id: str,
+        *,
+        friend_id: str = "",
+    ) -> list[dict[str, Any]]:
+        counts: dict[str, tuple[str, int]] = {}
+        for row in self._observed_world_rows(tenant_id, friend_id=friend_id):
+            try:
+                world_id = require_world_id(str(row["world_id"]))
+            except ValueError:
+                continue
+            for name in world_metadata_tags(self.store.world_cache_get(world_id)):
+                folded = name.casefold()
+                display_name, count = counts.get(folded, (name, 0))
+                counts[folded] = (display_name, count + 1)
+        return [
+            {"name": name, "count": count}
+            for name, count in sorted(
+                counts.values(), key=lambda item: (-item[1], item[0].casefold())
+            )
+        ]
+
     def library(
         self,
         tenant_id: str,
@@ -390,7 +459,7 @@ class WorldService:
         query: str = "",
         author: str = "",
         friend_id: str = "",
-        tag_id: str = "",
+        world_tag: str = "",
         cursor: str = "",
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -404,41 +473,7 @@ class WorldService:
         except (ValueError, UnicodeDecodeError):
             raise ValueError("分页位置无效") from None
         offset = max(0, offset)
-        expression = self._world_expression("e.location")
-        clauses = [
-            "e.tenant_id=?",
-            "e.location GLOB 'wrld_*'",
-            """NOT EXISTS(SELECT 1 FROM event_anomalies a
-            WHERE a.tenant_id=e.tenant_id AND a.event_kind='status_event'
-              AND a.event_id=e.client_event_id)""",
-        ]
-        params: list[Any] = [tenant_id]
-        if friend_id:
-            clauses.append("e.friend_id=?")
-            params.append(friend_id)
-        if tag_id:
-            clauses.append(
-                """EXISTS(SELECT 1 FROM friend_tags ft
-                WHERE ft.tenant_id=e.tenant_id AND ft.friend_id=e.friend_id
-                  AND ft.tag_id=?)"""
-            )
-            params.append(tag_id)
-        with self.store.lock, self.store.connection() as db:
-            self.store._require_tenant(db, tenant_id)
-            _require_filter_ids(
-                db, tenant_id, friend_id=friend_id, tag_id=tag_id
-            )
-            rows = [
-                dict(row)
-                for row in db.execute(
-                    f"""SELECT {expression} AS world_id,
-                    MAX(e.occurred_at) AS last_observed,COUNT(*) AS event_count
-                    FROM status_events e WHERE {' AND '.join(clauses)}
-                    GROUP BY world_id ORDER BY last_observed DESC,world_id
-                    LIMIT 5000""",
-                    params,
-                ).fetchall()
-            ]
+        rows = self._observed_world_rows(tenant_id, friend_id=friend_id)
 
         items: list[dict[str, Any]] = []
         folded_query = str(query or "").strip().casefold()
@@ -464,6 +499,8 @@ class WorldService:
             if folded_query and folded_query not in searchable:
                 continue
             if folded_author and folded_author not in world_author.casefold():
+                continue
+            if not world_has_metadata_tag(payload, world_tag):
                 continue
             items.append(
                 {
@@ -551,26 +588,16 @@ class DiscoveryService:
         tenant_id: str,
         *,
         friend_id: str,
-        tag_id: str,
         include_self: bool,
     ) -> dict[str, Any]:
         with self.store.lock, self.store.connection() as db:
             self.store._require_tenant(db, tenant_id)
-            _require_filter_ids(
-                db, tenant_id, friend_id=friend_id, tag_id=tag_id
-            )
+            _require_filter_ids(db, tenant_id, friend_id=friend_id)
             friend_clauses = ["f.tenant_id=?"]
             friend_params: list[Any] = [tenant_id]
             if friend_id:
                 friend_clauses.append("f.id=?")
                 friend_params.append(friend_id)
-            if tag_id:
-                friend_clauses.append(
-                    """EXISTS(SELECT 1 FROM friend_tags ft
-                    WHERE ft.tenant_id=f.tenant_id AND ft.friend_id=f.id
-                      AND ft.tag_id=?)"""
-                )
-                friend_params.append(tag_id)
             if not include_self:
                 friend_clauses.append("f.is_self=0")
             friends = [
@@ -594,17 +621,11 @@ class DiscoveryService:
                     AS anomaly_revision,
                 COALESCE((SELECT MAX(updated_at) FROM friends WHERE tenant_id=?),'')
                     AS friend_revision,
-                COALESCE((SELECT MAX(rowid) FROM friend_tags WHERE tenant_id=?),0)
-                    AS friend_tag_revision,
-                COALESCE((SELECT MAX(updated_at) FROM tags WHERE tenant_id=?),'')
-                    AS tag_revision,
                 COALESCE((SELECT MAX(fetched_at) FROM world_cache),'')
                     AS world_cache_revision,
                 COALESCE((SELECT MAX(updated_at) FROM world_resolution_state),'')
                     AS resolver_revision""",
                 (
-                    tenant_id,
-                    tenant_id,
                     tenant_id,
                     tenant_id,
                     tenant_id,
@@ -939,6 +960,7 @@ class DiscoveryService:
         end: datetime,
         previous_start: datetime,
         snapshot: dict[str, Any],
+        world_tag: str,
     ) -> dict[str, Any]:
         current_coverage = build_observed_windows(
             snapshot["samples"], range_start=start, range_end=end
@@ -953,20 +975,28 @@ class DiscoveryService:
             snapshot, previous_coverage, previous_start, start
         )
 
+        selected_worlds = {
+            world_id
+            for world_id in current
+            if world_has_metadata_tag(
+                self.store.world_cache_get(world_id), world_tag
+            )
+        }
         hot = [
             {
                 **self._world_presentation(tenant_id, world_id),
                 "world_id": world_id,
-                **stats,
+                **current[world_id],
             }
-            for world_id, stats in current.items()
+            for world_id in selected_worlds
         ]
         hot.sort(key=self._hot_sort_key)
         for rank, item in enumerate(hot, 1):
             item["rank"] = rank
 
         rising: list[dict[str, Any]] = []
-        for world_id, current_stats in current.items():
+        for world_id in selected_worlds:
+            current_stats = current[world_id]
             previous_stats = previous.get(world_id, self._empty_world_stats())
             delta = {
                 "minutes": round(
@@ -1008,6 +1038,7 @@ class DiscoveryService:
             },
             "coverage": self._coverage_payload(current_coverage, start, end),
             "selected_people": len(snapshot["friends"]),
+            "world_tag": str(world_tag or "").strip() or None,
             "ranking": {
                 "hot": [
                     "unique_people:desc",
@@ -1031,7 +1062,7 @@ class DiscoveryService:
         tenant_id: str,
         days: int,
         friend_id: str = "",
-        tag_id: str = "",
+        world_tag: str = "",
         include_self: bool = True,
     ) -> dict[str, Any]:
         selected_days = int(days)
@@ -1043,14 +1074,13 @@ class DiscoveryService:
         scope = self._scope(
             tenant_id,
             friend_id=str(friend_id or ""),
-            tag_id=str(tag_id or ""),
             include_self=bool(include_self),
         )
         cache_key = (
             tenant_id,
             selected_days,
             str(friend_id or ""),
-            str(tag_id or ""),
+            str(world_tag or "").strip().casefold(),
             bool(include_self),
             int(end.timestamp() // 60),
             scope["selection"],
@@ -1075,6 +1105,7 @@ class DiscoveryService:
             end,
             previous_start,
             snapshot,
+            str(world_tag or ""),
         )
         with self._cache_lock:
             if len(self._cache) >= self._CACHE_LIMIT:
