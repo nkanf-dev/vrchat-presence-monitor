@@ -4,7 +4,7 @@
 - decided_by: statistical_default
 - approval_source: user authorized unresolved best-practice progress with “通过，后续无需再审批”
 - date: 2026-08-30
-- commit: pending
+- commit: 97417e9
 - patterns:
   - D_external_dependency
   - E_security_boundary

@@ -14,7 +14,7 @@ and cites explicit approval evidence.
 | SKMB-2026-08-30-004 | accepted | portable backup and restore | B,C,E,F,G | decisions/2026-08-30-004-backup-restore.md | 68721f8 |
 | SKMB-2026-08-30-005 | accepted | browser navigation and recoverable UX | B,C,F | decisions/2026-08-30-005-browser-state.md | 68721f8 |
 | SKMB-2026-08-30-006 | accepted | release and production deployment | B,D,F,G | decisions/2026-08-30-006-release-deployment.md | 68721f8 |
-| SKMB-2026-08-30-007 | proposed | off-site backup egress | D,E,F | decisions/2026-08-30-007-offsite-backup-egress.md | pending |
+| SKMB-2026-08-30-007 | proposed | off-site backup egress | D,E,F | decisions/2026-08-30-007-offsite-backup-egress.md | 97417e9 |
 
 ## Named States
 
