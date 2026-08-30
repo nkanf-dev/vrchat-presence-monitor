@@ -63,6 +63,15 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def stable_id(prefix: str, *parts: object) -> str:
+    encoded = json.dumps(
+        parts,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"{prefix}_" + hashlib.sha256(encoded).hexdigest()
+
+
 def normalize_timestamp(value: Any, fallback: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -113,6 +122,17 @@ class Store:
             raise
         finally:
             db.close()
+
+    @contextmanager
+    def _write_transaction(
+        self, existing: sqlite3.Connection | None = None
+    ):
+        if existing is not None:
+            yield existing
+            return
+        with self.lock, self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            yield db
 
     def _init(self):
         with self.lock, self.connection() as db:
@@ -1193,6 +1213,7 @@ class Store:
         *,
         friend_batch_limit: int | None = 5000,
         event_batch_limit: int | None = 10000,
+        _db: sqlite3.Connection | None = None,
     ) -> dict[str, int]:
         if friend_batch_limit is not None and len(friends) > friend_batch_limit:
             raise ValueError(f"单批玩家记录超过上限（{friend_batch_limit}）")
@@ -1202,8 +1223,7 @@ class Store:
         accepted = 0
         accepted_friends = 0
         fallback_updated_at = "1970-01-01T00:00:00+00:00" if source == "import" else now()
-        with self.lock, self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self._write_transaction(_db) as db:
             if source != "import" and db.execute(
                 """SELECT 1 FROM collectors
                 WHERE id=? AND tenant_id=? AND revoked_at IS NULL""",
@@ -1461,6 +1481,335 @@ class Store:
                 (now(), collector_id, tenant_id),
             )
         return {"friends": accepted_friends, "events": accepted, "changed": changed}
+
+    def ingest_authoritative_snapshot(
+        self,
+        tenant_id: str,
+        collector_id: str,
+        friends: list[dict[str, Any]],
+        events: list[dict[str, Any]],
+        *,
+        source: str,
+        observed_at: str,
+        expected_interval_seconds: int,
+        duration_ms: int | None = None,
+    ) -> dict[str, int]:
+        """Commit a complete snapshot and its observation evidence atomically."""
+        if len(friends) > 5000:
+            raise ValueError("单批玩家记录超过上限（5000）")
+        if len(events) > 10000:
+            raise ValueError("单批历史记录超过上限（10000）")
+        interval = int(expected_interval_seconds)
+        if interval < 45 or interval > 3600:
+            raise ValueError("采集间隔必须在 45 到 3600 秒之间")
+        source_text = self._text(source, 80, "采集来源")
+        observed = self._timestamp(observed_at, now(), "采集时间")
+        observed_time = datetime.fromisoformat(observed)
+        duration = None if duration_ms is None else max(0, int(duration_ms))
+
+        incoming_ids: set[str] = set()
+        for item in friends:
+            friend_id = self._text(
+                item.get("id") or item.get("userId"), 128, "玩家 ID"
+            )
+            if not friend_id:
+                raise ValueError("玩家记录缺少 ID")
+            if friend_id in incoming_ids:
+                raise ValueError("完整快照包含重复玩家")
+            incoming_ids.add(friend_id)
+
+        with self.lock, self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute(
+                """SELECT 1 FROM collectors
+                WHERE id=? AND tenant_id=? AND revoked_at IS NULL""",
+                (collector_id, tenant_id),
+            ).fetchone() is None:
+                raise KeyError("collector not found")
+
+            previous_tracking: dict[str, bool] = {}
+            for row in db.execute(
+                """SELECT friend_id,tracked FROM friend_tracking_events
+                WHERE tenant_id=? ORDER BY occurred_at,event_id""",
+                (tenant_id,),
+            ).fetchall():
+                previous_tracking[str(row["friend_id"])] = bool(row["tracked"])
+            previously_tracked = {
+                friend_id
+                for friend_id, tracked in previous_tracking.items()
+                if tracked
+            }
+            old_identities = {
+                str(row["id"]): {
+                    "username": str(row["username"]),
+                    "display_name": str(row["display_name"]),
+                }
+                for row in db.execute(
+                    """SELECT id,username,display_name FROM friends
+                    WHERE tenant_id=?""",
+                    (tenant_id,),
+                ).fetchall()
+            }
+
+            result = self.ingest(
+                tenant_id,
+                collector_id,
+                friends,
+                events,
+                source_text,
+                _db=db,
+            )
+
+            tracking_edges = [
+                *((friend_id, False) for friend_id in previously_tracked - incoming_ids),
+                *((friend_id, True) for friend_id in incoming_ids - previously_tracked),
+            ]
+            for friend_id, tracked in sorted(tracking_edges):
+                event_id = stable_id(
+                    "tracking", friend_id, observed, int(tracked), source_text
+                )
+                db.execute(
+                    """INSERT OR IGNORE INTO friend_tracking_events(
+                        tenant_id,event_id,friend_id,tracked,occurred_at,source
+                    ) VALUES(?,?,?,?,?,?)""",
+                    (
+                        tenant_id,
+                        event_id,
+                        friend_id,
+                        int(tracked),
+                        observed,
+                        source_text,
+                    ),
+                )
+
+            if incoming_ids:
+                placeholders = ",".join("?" for _ in incoming_ids)
+                current_identities = db.execute(
+                    f"""SELECT id,username,display_name FROM friends
+                    WHERE tenant_id=? AND id IN ({placeholders})""",
+                    (tenant_id, *sorted(incoming_ids)),
+                ).fetchall()
+                for row in current_identities:
+                    friend_id = str(row["id"])
+                    old = old_identities.get(friend_id)
+                    if old is None:
+                        continue
+                    for field in ("username", "display_name"):
+                        old_value = old[field]
+                        new_value = str(row[field])
+                        if old_value == new_value:
+                            continue
+                        event_id = stable_id(
+                            "identity",
+                            friend_id,
+                            field,
+                            old_value,
+                            new_value,
+                            observed,
+                            source_text,
+                        )
+                        db.execute(
+                            """INSERT OR IGNORE INTO friend_identity_events(
+                                tenant_id,event_id,friend_id,field,old_value,new_value,
+                                occurred_at,source
+                            ) VALUES(?,?,?,?,?,?,?,?)""",
+                            (
+                                tenant_id,
+                                event_id,
+                                friend_id,
+                                field,
+                                old_value,
+                                new_value,
+                                observed,
+                                source_text,
+                            ),
+                        )
+
+            future_cutoff = observed_time + timedelta(minutes=5)
+            for event in events:
+                event_time = datetime.fromisoformat(
+                    self._timestamp(
+                        event.get("occurred_at"), observed, "历史记录时间"
+                    )
+                )
+                if event_time <= future_cutoff:
+                    continue
+                supplied_id = str(
+                    event.get("client_event_id") or event.get("id") or ""
+                )
+                if supplied_id:
+                    stored_id = (
+                        f"{collector_id}:{supplied_id}"
+                        if LEGACY_EVENT_ALIAS_PATTERN.fullmatch(supplied_id)
+                        else supplied_id
+                    )
+                else:
+                    identity = json.dumps(
+                        [
+                            event.get("friend_id") or event.get("friendId") or "",
+                            event.get("occurred_at") or "",
+                            event.get("old_status") or "unknown",
+                            event.get("new_status") or "offline",
+                            event.get("location") or "",
+                            event.get("platform") or "",
+                            event.get("source") or source_text,
+                        ],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    stored_id = "legacy_event_" + hashlib.sha256(identity).hexdigest()
+                anomaly_id = stable_id(
+                    "anomaly", "status_event", stored_id, "future_timestamp"
+                )
+                db.execute(
+                    """INSERT OR IGNORE INTO event_anomalies(
+                        tenant_id,anomaly_id,event_kind,event_id,reason,detected_at
+                    ) VALUES(?,?,?,?,?,?)""",
+                    (
+                        tenant_id,
+                        anomaly_id,
+                        "status_event",
+                        stored_id,
+                        "future_timestamp",
+                        observed,
+                    ),
+                )
+
+            online_count = sum(
+                1
+                for item in friends
+                if str(item.get("status") or "offline").lower() != "offline"
+                and str(item.get("location") or "").lower() != "offline"
+            )
+            sample_id = stable_id(
+                "sample", tenant_id, source_text, observed, "success"
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO collection_samples(
+                    tenant_id,sample_id,observed_at,source,outcome,authoritative,
+                    expected_interval_seconds,friend_count,online_count,duration_ms,
+                    error_category
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    tenant_id,
+                    sample_id,
+                    observed,
+                    source_text,
+                    "success",
+                    1,
+                    interval,
+                    len(incoming_ids),
+                    online_count,
+                    duration,
+                    "",
+                ),
+            )
+            db.execute(
+                """UPDATE collectors SET last_sync=?,last_error=''
+                WHERE id=? AND tenant_id=?""",
+                (observed, collector_id, tenant_id),
+            )
+            db.execute(
+                """UPDATE vrchat_accounts SET state='active',last_sync=?,last_error='',
+                updated_at=? WHERE tenant_id=?""",
+                (observed, observed, tenant_id),
+            )
+            return result
+
+    def record_collection_failure(
+        self,
+        tenant_id: str,
+        source: str,
+        error_category: str,
+        expected_interval_seconds: int,
+        *,
+        observed_at: str | None = None,
+        duration_ms: int | None = None,
+    ) -> bool:
+        """Record a failure transition while raw capture preserves each attempt."""
+        interval = int(expected_interval_seconds)
+        if interval < 45 or interval > 3600:
+            raise ValueError("采集间隔必须在 45 到 3600 秒之间")
+        source_text = self._text(source, 80, "采集来源")
+        category = self._text(error_category, 80, "错误类别") or "unknown"
+        observed = self._timestamp(observed_at, now(), "采集时间")
+        duration = None if duration_ms is None else max(0, int(duration_ms))
+        with self.lock, self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._require_tenant(db, tenant_id)
+            previous = db.execute(
+                """SELECT outcome,error_category FROM collection_samples
+                WHERE tenant_id=? AND source=?
+                ORDER BY observed_at DESC,sample_id DESC LIMIT 1""",
+                (tenant_id, source_text),
+            ).fetchone()
+            if (
+                previous is not None
+                and str(previous["outcome"]) == "failure"
+                and str(previous["error_category"]) == category
+            ):
+                return False
+            sample_id = stable_id(
+                "sample", tenant_id, source_text, observed, "failure", category
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO collection_samples(
+                    tenant_id,sample_id,observed_at,source,outcome,authoritative,
+                    expected_interval_seconds,friend_count,online_count,duration_ms,
+                    error_category
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    tenant_id,
+                    sample_id,
+                    observed,
+                    source_text,
+                    "failure",
+                    1,
+                    interval,
+                    None,
+                    None,
+                    duration,
+                    category,
+                ),
+            )
+            return True
+
+    def collection_sample_count(self, tenant_id: str) -> int:
+        with self.lock, self.connection() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM collection_samples WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+            return int(row[0])
+
+    def collection_failure_count(self, tenant_id: str) -> int:
+        with self.lock, self.connection() as db:
+            row = db.execute(
+                """SELECT COUNT(*) FROM collection_samples
+                WHERE tenant_id=? AND outcome='failure'""",
+                (tenant_id,),
+            ).fetchone()
+            return int(row[0])
+
+    def tracking_events(self, tenant_id: str) -> list[dict[str, Any]]:
+        with self.lock, self.connection() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    """SELECT friend_id,tracked,occurred_at,source,event_id
+                    FROM friend_tracking_events WHERE tenant_id=?
+                    ORDER BY occurred_at,friend_id,event_id""",
+                    (tenant_id,),
+                ).fetchall()
+            ]
+
+    def identity_event_count(self, tenant_id: str) -> int:
+        with self.lock, self.connection() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM friend_identity_events WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+            return int(row[0])
 
     def mark_collector_error(self, collector_id: str, error: str) -> None:
         with self.lock, self.connection() as db:

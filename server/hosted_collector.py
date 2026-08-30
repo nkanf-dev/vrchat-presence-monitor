@@ -482,6 +482,7 @@ class HostedCollectorManager:
         tenant_id = session.tenant_id
         if not self._is_current(session):
             return
+        started = time.monotonic()
         try:
             current_user = session.client.user()
             user_id = str(
@@ -508,18 +509,36 @@ class HostedCollectorManager:
                         events.append(event)
                 if not self._is_current(session):
                     return
-                self.store.ingest(
+                self.store.ingest_authoritative_snapshot(
                     tenant_id,
                     session.account["collector_id"],
                     normalized,
                     events,
-                    "hosted-rest",
+                    source="hosted-rest",
+                    observed_at=stamp,
+                    expected_interval_seconds=self.poll_seconds,
+                    duration_ms=int((time.monotonic() - started) * 1000),
                 )
-            self.store.mark_vrchat_account_result(tenant_id)
             with self._lock:
                 self._backoff.pop(tenant_id, None)
             self._schedule(tenant_id, self.poll_seconds + random.uniform(0, 20))
         except VRChatError as error:
+            category = (
+                "session_expired"
+                if error.status == 401
+                else "rate_limited"
+                if error.status == 429
+                else "network"
+                if error.status is None
+                else "upstream"
+            )
+            self.store.record_collection_failure(
+                tenant_id,
+                "hosted-rest",
+                category,
+                self.poll_seconds,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             if error.status == 401:
                 self.store.mark_vrchat_account_result(
                     tenant_id, error="需要重新登录 VRChat", reconnect=True
@@ -541,6 +560,13 @@ class HostedCollectorManager:
             self.store.mark_vrchat_account_result(tenant_id, error=message)
             self._schedule(tenant_id, delay + random.uniform(0, min(20, delay / 4)))
         except Exception:
+            self.store.record_collection_failure(
+                tenant_id,
+                "hosted-rest",
+                "network",
+                self.poll_seconds,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             with self._lock:
                 previous = self._backoff.get(tenant_id, 30)
                 delay = min(self.max_backoff_seconds, max(60, previous * 2))

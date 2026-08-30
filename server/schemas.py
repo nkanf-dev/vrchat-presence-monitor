@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Optional
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    model_validator,
+)
 
 
 class StrictModel(BaseModel):
@@ -89,7 +96,22 @@ class EventTelemetry(TelemetryModel):
     previous_event_ids: list[BoundedLegacyEventId] = Field(default_factory=list, max_length=1)
 
 
+class ObservationTelemetry(StrictModel):
+    observed_at: str = Field(min_length=1, max_length=64)
+    expected_interval_seconds: int = Field(ge=45, le=3600)
+    authoritative: Literal[True]
+
+
 class TelemetryRequest(StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     friends: list[FriendTelemetry] = Field(default_factory=list, max_length=5000)
     events: list[EventTelemetry] = Field(default_factory=list, max_length=10000)
+    observation: ObservationTelemetry | None = None
+
+    @model_validator(mode="after")
+    def validate_observation_contract(self) -> "TelemetryRequest":
+        if self.schema_version == 2 and self.observation is None:
+            raise ValueError("schema_version 2 requires observation")
+        if self.schema_version == 1 and self.observation is not None:
+            raise ValueError("schema_version 1 cannot claim observation coverage")
+        return self

@@ -641,6 +641,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             )
         payload = await _read_model(request, TelemetryRequest, config.max_telemetry_bytes)
         try:
+            if payload.schema_version == 2:
+                observation = payload.observation
+                if observation is None:  # Kept explicit for type checkers and audits.
+                    raise ValueError("schema_version 2 requires observation")
+                return await run_in_threadpool(
+                    database.ingest_authoritative_snapshot,
+                    auth.row["tenant_id"],
+                    auth.row["id"],
+                    [friend.model_dump() for friend in payload.friends],
+                    [event.model_dump() for event in payload.events],
+                    source="external-collector",
+                    observed_at=observation.observed_at,
+                    expected_interval_seconds=observation.expected_interval_seconds,
+                )
             return await run_in_threadpool(
                 database.ingest,
                 auth.row["tenant_id"],
