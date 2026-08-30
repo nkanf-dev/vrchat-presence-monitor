@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getDetailHistoryMarker,
+  navigateHashHref,
   parametersForRoute,
   parseRoute,
   routeForArea,
@@ -216,5 +217,19 @@ describe('product navigation', () => {
     expect(getDetailHistoryMarker()).toBeNull();
     expect(window.history.state).toEqual({ preserved: 'base' });
     expect(result.current.parameters.get('peopleQ')).toBe('bob');
+  });
+
+  it('marks detail entries opened by a hash destination such as global search', () => {
+    window.history.replaceState(
+      { preserved: 'people' },
+      '',
+      `${window.location.pathname}${window.location.search}#area=people`,
+    );
+
+    act(() => navigateHashHref('#view=people&personDetail=usr_search'));
+
+    expect(window.location.hash).toBe('#view=people&personDetail=usr_search');
+    expect(getDetailHistoryMarker()).toEqual({ type: 'person', id: 'usr_search' });
+    expect(window.history.state).toMatchObject({ preserved: 'people' });
   });
 });

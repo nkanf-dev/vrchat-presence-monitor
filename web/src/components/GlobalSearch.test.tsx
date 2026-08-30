@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { GlobalSearch } from './GlobalSearch';
+import { getDetailHistoryMarker } from '../navigation';
 
 const jsonResponse = (body: unknown) => new Response(JSON.stringify(body), {
   status: 200,
@@ -34,7 +35,11 @@ const searchResponse = (query: string, id: string, name: string) => ({
 describe('global search', () => {
   afterEach(() => {
     localStorage.clear();
-    window.location.hash = '';
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}`,
+    );
     vi.unstubAllGlobals();
   });
 
@@ -59,6 +64,7 @@ describe('global search', () => {
     await user.click(option);
 
     expect(window.location.hash).toBe('#view=people&personDetail=usr_a');
+    expect(getDetailHistoryMarker()).toEqual({ type: 'person', id: 'usr_a' });
   });
 
   it('offers recent destinations before a query and closes with Escape', async () => {

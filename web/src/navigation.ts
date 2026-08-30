@@ -216,6 +216,24 @@ const hashUrl = (serialized: string) => {
   return `${window.location.pathname}${window.location.search}${suffix}`;
 };
 
+export function navigateHashHref(href: string) {
+  const serialized = href.replace(/^#/, '');
+  if (serialized === readHash()) {
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    return;
+  }
+  const parameters = new URLSearchParams(serialized);
+  const worldId = parameters.get(detailParameterKey.world)?.trim() ?? '';
+  const personId = parameters.get(detailParameterKey.person)?.trim() ?? '';
+  const nextState = worldId
+    ? withDetailHistoryMarker('world', worldId)
+    : personId
+      ? withDetailHistoryMarker('person', personId)
+      : withoutDetailHistoryMarker(window.history.state);
+  window.history.pushState(nextState, '', hashUrl(serialized));
+  window.dispatchEvent(new Event(HASH_PARAMETERS_CHANGED));
+}
+
 const routeScrollStorageKey = (key: string) => `presence-monitor:scroll:${key}`;
 
 const readRouteScroll = (key: string) => {

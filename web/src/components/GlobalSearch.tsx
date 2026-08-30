@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { ApiError, getSearch, type SearchResults, worldImageUrl } from '../api';
 import { formatDateTime, initials, statusLabel } from '../format';
+import { navigateHashHref } from '../navigation';
 
 type ResultItem = {
   key: string;
@@ -184,12 +185,7 @@ export function GlobalSearch() {
     rememberDestination(item.href);
     setRecent(readRecent());
     close();
-    const hash = item.href.replace(/^#/, '');
-    if (hash === window.location.hash.replace(/^#/, '')) {
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
-    } else {
-      window.location.hash = hash;
-    }
+    navigateHashHref(item.href);
   };
 
   const grouped = displayed.reduce<Array<{ group: ResultItem['group']; items: ResultItem[] }>>((all, item) => {
