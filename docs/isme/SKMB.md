@@ -14,6 +14,7 @@ and cites explicit approval evidence.
 | SKMB-2026-08-30-004 | accepted | portable backup and restore | B,C,E,F,G | decisions/2026-08-30-004-backup-restore.md | 68721f8 |
 | SKMB-2026-08-30-005 | accepted | browser navigation and recoverable UX | B,C,F | decisions/2026-08-30-005-browser-state.md | 68721f8 |
 | SKMB-2026-08-30-006 | accepted | release and production deployment | B,D,F,G | decisions/2026-08-30-006-release-deployment.md | 68721f8 |
+| SKMB-2026-08-30-007 | proposed | off-site backup egress | D,E,F | decisions/2026-08-30-007-offsite-backup-egress.md | pending |
 
 ## Named States
 
@@ -65,7 +66,9 @@ and cites explicit approval evidence.
 
 ## Statistical Defaults Allowed Temporarily
 
-None.
+| id | scope | decision | approval source |
+| --- | --- | --- | --- |
+| SKMB-2026-08-30-007 | off-site backup egress | Explicit proxy only; HTTPS remains end-to-end; fail closed without direct fallback | Designer authorized unresolved best-practice progress with “通过，后续无需再审批” |
 
 ## Open Decisions
 

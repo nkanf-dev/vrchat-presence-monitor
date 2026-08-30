@@ -20,6 +20,7 @@ def main() -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--archive", type=Path)
     source.add_argument("--remote-url")
+    parser.add_argument("--proxy-url", default="")
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--instance-id", default="production")
@@ -33,7 +34,11 @@ def main() -> int:
     else:
         if arguments.token_file is None:
             parser.error("--token-file is required with --remote-url")
-        client = R2BackupClient(arguments.remote_url, arguments.token_file)
+        client = R2BackupClient(
+            arguments.remote_url,
+            arguments.token_file,
+            proxy_url=arguments.proxy_url,
+        )
         latest = client.latest(instance_id=arguments.instance_id, tier=arguments.latest_tier)
         with tempfile.TemporaryDirectory(prefix="presence-monitor-restore-cli-") as directory:
             report = client.restore_drill(str(latest["key"]), latest, Path(directory))

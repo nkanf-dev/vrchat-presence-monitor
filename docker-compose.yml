@@ -182,6 +182,8 @@ services:
       - /backups
       - --remote-url
       - "${BACKUP_REMOTE_URL:-}"
+      - --proxy-url
+      - "${BACKUP_PROXY_URL:-}"
       - --token-file
       - /run/secrets/backup_token
       - --instance-id

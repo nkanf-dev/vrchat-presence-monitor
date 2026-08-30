@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -367,6 +368,61 @@ class R2BackupTests(unittest.TestCase):
                     max_request_bytes=MAX_COMPLETE_JSON_BYTES,
                 )
             self.assertEqual(len(captured), 1)
+
+    def test_proxy_is_explicit_and_cannot_embed_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = os.environ.get("HTTPS_PROXY")
+            os.environ["HTTPS_PROXY"] = "http://ambient.invalid:9999"
+            try:
+                direct = R2BackupClient(
+                    "http://127.0.0.1:1",
+                    self._token(root),
+                )
+                explicit = R2BackupClient(
+                    "http://127.0.0.1:1",
+                    self._token(root),
+                    proxy_url="http://172.18.0.1:17890",
+                )
+            finally:
+                if original is None:
+                    os.environ.pop("HTTPS_PROXY", None)
+                else:
+                    os.environ["HTTPS_PROXY"] = original
+
+            direct_handlers = [
+                handler
+                for handler in direct.opener.handlers
+                if isinstance(handler, urllib.request.ProxyHandler)
+            ]
+            explicit_handler = next(
+                handler
+                for handler in explicit.opener.handlers
+                if isinstance(handler, urllib.request.ProxyHandler)
+            )
+            self.assertFalse(any(handler.proxies for handler in direct_handlers))
+            self.assertEqual(
+                explicit_handler.proxies,
+                {
+                    "http": "http://172.18.0.1:17890",
+                    "https": "http://172.18.0.1:17890",
+                },
+            )
+
+            for invalid in (
+                "socks5://127.0.0.1:7890",
+                "http://user:secret@127.0.0.1:7890",
+                "http://127.0.0.1:7890/path",
+            ):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    PermanentBackupError,
+                    "proxy URL",
+                ):
+                    R2BackupClient(
+                        "http://127.0.0.1:1",
+                        self._token(root),
+                        proxy_url=invalid,
+                    )
 
     def test_retry_honors_429_but_permanent_403_is_not_retried(self):
         with tempfile.TemporaryDirectory() as directory, FakeGateway() as gateway:

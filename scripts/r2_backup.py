@@ -193,6 +193,7 @@ class R2BackupClient:
         attempts: int = 5,
         sleeper: Callable[[float], None] = time.sleep,
         part_bytes: int = PART_BYTES,
+        proxy_url: str = "",
     ):
         parsed = urllib.parse.urlsplit(str(base_url or "").rstrip("/"))
         loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
@@ -208,7 +209,40 @@ class R2BackupClient:
         self.attempts = max(1, min(int(attempts), 10))
         self.sleeper = sleeper
         self.part_bytes = max(1, min(int(part_bytes), MAX_PART_BYTES))
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        proxy = self._proxy_url(proxy_url)
+        proxies = {"http": proxy, "https": proxy} if proxy else {}
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler(proxies),
+            _NoRedirect(),
+        )
+
+    @staticmethod
+    def _proxy_url(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        parsed = urllib.parse.urlsplit(text)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise PermanentBackupError("backup proxy URL is invalid")
+        try:
+            port = parsed.port
+        except ValueError as error:
+            raise PermanentBackupError("backup proxy URL is invalid") from error
+        if port is not None and not 1 <= port <= 65535:
+            raise PermanentBackupError("backup proxy URL is invalid")
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        authority = f"{host}:{port}" if port is not None else host
+        return urllib.parse.urlunsplit((parsed.scheme, authority, "", "", ""))
 
     def _token(self) -> str:
         try:
@@ -742,6 +776,7 @@ def main() -> int:
     parser.add_argument("--backup-dir", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--remote-url")
+    parser.add_argument("--proxy-url", default="")
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--instance-id", default="production")
     parser.add_argument("--interval-seconds", type=int, default=0)
@@ -759,7 +794,11 @@ def main() -> int:
     if not arguments.remote_url or arguments.token_file is None:
         parser.error("--remote-url and --token-file are required unless --health is used")
 
-    client = R2BackupClient(arguments.remote_url, arguments.token_file)
+    client = R2BackupClient(
+        arguments.remote_url,
+        arguments.token_file,
+        proxy_url=arguments.proxy_url,
+    )
     interval = max(0, arguments.interval_seconds)
     drill_interval = max(1, arguments.drill_interval_seconds)
     while True:
