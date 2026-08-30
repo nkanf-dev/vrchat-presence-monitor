@@ -29,6 +29,21 @@ class VRChatTwoFactorRequest(StrictModel):
     code: str = Field(min_length=1, max_length=64)
 
 
+class AnnotationRequest(StrictModel):
+    note: str = Field(default="", max_length=20_000)
+    pinned: bool = False
+    revision: str | None = Field(default=None, max_length=256)
+
+
+class TagRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+    color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+
+
+class PreferenceRequest(StrictModel):
+    timezone: str = Field(min_length=1, max_length=80)
+
+
 class BootstrapRequest(StrictModel):
     tenant_name: str = Field(min_length=1, max_length=120)
     collector_name: str = Field(default="local bridge", min_length=1, max_length=120)
@@ -113,5 +128,5 @@ class TelemetryRequest(StrictModel):
         if self.schema_version == 2 and self.observation is None:
             raise ValueError("schema_version 2 requires observation")
         if self.schema_version == 1 and self.observation is not None:
-            raise ValueError("schema_version 1 cannot claim observation coverage")
+            raise ValueError("schema_version 1 does not accept observation")
         return self

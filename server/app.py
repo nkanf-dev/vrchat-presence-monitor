@@ -34,9 +34,21 @@ from .backup_json import (
     read_backup_manifest as _read_backup_manifest,
 )
 from .hosted_collector import HostedCollectorManager
+from .health import TenantHealthService
+from .insights import InsightsService
+from .organization import (
+    AnnotationConflict,
+    OrganizationConflict,
+    OrganizationNotFound,
+    OrganizationService,
+)
+from .search import SearchService
 from .schemas import (
+    AnnotationRequest,
     BootstrapRequest,
     LoginRequest,
+    PreferenceRequest,
+    TagRequest,
     TelemetryRequest,
     VRChatLoginRequest,
     VRChatTwoFactorRequest,
@@ -113,6 +125,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         database.session_cipher = session_cipher
     vrchat_auth = VRChatAuthService(session_cipher) if session_cipher else None
     analytics = AnalyticsService(database)
+    organization = OrganizationService(database)
+    search = SearchService(database)
+    insights = InsightsService(database)
+    tenant_health = TenantHealthService(database)
     hosted_collector = (
         HostedCollectorManager(
             database,
@@ -149,6 +165,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     app.state.settings = config
     app.state.store = database
     app.state.analytics = analytics
+    app.state.organization = organization
+    app.state.search = search
+    app.state.insights = insights
+    app.state.tenant_health = tenant_health
     app.state.hosted_collector = hosted_collector
 
     @app.exception_handler(HTTPException)
@@ -162,6 +182,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
         return JSONResponse(status_code=422, content={"error": "invalid request"})
+
+    @app.exception_handler(AnnotationConflict)
+    async def annotation_conflict(_: Request, error: AnnotationConflict) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"server": error.server})
+
+    @app.exception_handler(OrganizationNotFound)
+    async def organization_not_found(_: Request, __: OrganizationNotFound) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"error": "not found"})
+
+    @app.exception_handler(OrganizationConflict)
+    async def organization_conflict(_: Request, __: OrganizationConflict) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"error": "conflict"})
 
     @app.middleware("http")
     async def product_headers(request: Request, call_next):
@@ -226,6 +258,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             return await run_in_threadpool(function, *args, **kwargs)
         except KeyError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found") from error
+
+    async def organization_call(
+        function: Callable[..., Result], *args: Any, **kwargs: Any
+    ) -> Result:
+        try:
+            return await run_in_threadpool(function, *args, **kwargs)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(error),
+            ) from error
 
     @app.get("/healthz")
     @app.get("/livez")
@@ -301,6 +344,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         _: None = Depends(bootstrap_admin),
     ) -> dict[str, Any]:
         return await admin_call(database.security_audit, tenant_id, limit=limit, offset=offset)
+
+    @app.get("/v1/admin/health")
+    async def tenant_health_overview(
+        _: None = Depends(bootstrap_admin),
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(tenant_health.list)
 
     @app.post("/v1/login")
     async def login(request: Request, response: Response) -> dict[str, Any]:
@@ -558,6 +607,164 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     ) -> dict[str, Any]:
         return database.friends_page(
             auth.row["tenant_id"], query=q, status=status_filter, limit=limit, offset=offset
+        )
+
+    @app.get("/v1/search")
+    def global_search(
+        q: str = Query(min_length=1, max_length=160),
+        limit: int = Query(default=8, ge=1, le=20),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        try:
+            return search.search(auth.row["tenant_id"], q, limit)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/friends/{friend_id}/annotation")
+    async def friend_annotation(
+        friend_id: str = PathParam(min_length=1, max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            organization.get_annotation,
+            auth.row["tenant_id"],
+            friend_id,
+        )
+
+    @app.put("/v1/friends/{friend_id}/annotation")
+    async def update_friend_annotation(
+        request: Request,
+        friend_id: str = PathParam(min_length=1, max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        payload = await _read_model(request, AnnotationRequest, 32 * 1024)
+        return await organization_call(
+            organization.put_annotation,
+            auth.row["tenant_id"],
+            friend_id,
+            payload.note,
+            payload.pinned,
+            payload.revision,
+        )
+
+    @app.get("/v1/friends/{friend_id}/insights")
+    def friend_insights(
+        friend_id: str = PathParam(min_length=1, max_length=128),
+        range_from: str = Query(alias="from", min_length=10, max_length=10),
+        range_to: str = Query(alias="to", min_length=10, max_length=10),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        try:
+            return insights.friend(
+                auth.row["tenant_id"], friend_id, range_from, range_to
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/tags")
+    async def tags(auth: Authenticated = Depends(viewer)) -> list[dict[str, Any]]:
+        return await run_in_threadpool(
+            organization.list_tags,
+            auth.row["tenant_id"],
+        )
+
+    @app.post("/v1/tags", status_code=201)
+    async def create_tag(
+        request: Request,
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        payload = await _read_model(request, TagRequest, 8 * 1024)
+        return await organization_call(
+            organization.create_tag,
+            auth.row["tenant_id"],
+            payload.name,
+            payload.color,
+        )
+
+    @app.put("/v1/tags/{tag_id}")
+    async def update_tag(
+        request: Request,
+        tag_id: str = PathParam(min_length=1, max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        payload = await _read_model(request, TagRequest, 8 * 1024)
+        return await organization_call(
+            organization.update_tag,
+            auth.row["tenant_id"],
+            tag_id,
+            payload.name,
+            payload.color,
+        )
+
+    @app.delete("/v1/tags/{tag_id}")
+    async def delete_tag(
+        request: Request,
+        tag_id: str = PathParam(min_length=1, max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, bool]:
+        require_same_origin(request)
+        await run_in_threadpool(
+            organization.delete_tag,
+            auth.row["tenant_id"],
+            tag_id,
+        )
+        return {"ok": True}
+
+    @app.put("/v1/friends/{friend_id}/tags/{tag_id}")
+    async def assign_friend_tag(
+        request: Request,
+        friend_id: str = PathParam(min_length=1, max_length=128),
+        tag_id: str = PathParam(min_length=1, max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        return await run_in_threadpool(
+            organization.assign_tag,
+            auth.row["tenant_id"],
+            friend_id,
+            tag_id,
+        )
+
+    @app.delete("/v1/friends/{friend_id}/tags/{tag_id}")
+    async def unassign_friend_tag(
+        request: Request,
+        friend_id: str = PathParam(min_length=1, max_length=128),
+        tag_id: str = PathParam(min_length=1, max_length=128),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        return await run_in_threadpool(
+            organization.unassign_tag,
+            auth.row["tenant_id"],
+            friend_id,
+            tag_id,
+        )
+
+    @app.get("/v1/preferences")
+    async def preferences(
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, str]:
+        return await run_in_threadpool(
+            organization.get_preferences,
+            auth.row["tenant_id"],
+        )
+
+    @app.put("/v1/preferences")
+    async def update_preferences(
+        request: Request,
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, str]:
+        require_same_origin(request)
+        payload = await _read_model(request, PreferenceRequest, 8 * 1024)
+        return await organization_call(
+            organization.put_preferences,
+            auth.row["tenant_id"],
+            payload.timezone,
         )
 
     @app.get("/v1/events")
