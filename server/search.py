@@ -140,7 +140,7 @@ class SearchService:
                     "pinned": bool(row["pinned"]),
                     "tags": tags,
                     "matches": list(dict.fromkeys(matches)),
-                    "href": f"#view=people&person={quote(friend_id)}",
+                    "href": f"#view=people&personDetail={quote(friend_id)}",
                 }
             )
         return results
@@ -197,7 +197,7 @@ class SearchService:
                     ),
                     "last_observed": str(row["last_observed"]),
                     "resolved": bool(row["payload_json"]),
-                    "href": f"#view=worlds&world={quote(world_id)}",
+                    "href": f"#view=worlds&worldDetail={quote(world_id)}",
                 }
             )
             if len(results) >= limit:

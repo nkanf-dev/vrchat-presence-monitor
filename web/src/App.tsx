@@ -22,12 +22,14 @@ import { FriendDialog } from './components/FriendDialog';
 import { LoadingScreen, LoginScreen, OfflineScreen, VrchatReconnectDialog } from './components/AuthScreens';
 import { MoreNav } from './components/MoreNav';
 import { StatusBanner } from './components/StatusBanner';
+import { WorldDialog } from './components/WorldDialog';
 import { useHashRoute, usePageScrollRestoration } from './navigation';
 import { DataView } from './views/DataView';
 import { HistoryView } from './views/HistoryView';
 import { OverviewView } from './views/OverviewView';
 import { PeopleView } from './views/PeopleView';
 import { DailyView } from './views/DailyView';
+import { DiscoveryView } from './views/DiscoveryView';
 import { WorldsView } from './views/WorldsView';
 
 function InitialContentError({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -44,18 +46,12 @@ function InitialContentError({ message, onRetry }: { message: string; onRetry: (
   );
 }
 
-function AnalysisLanding({ section }: { section: 'relationships' | 'discover' }) {
-  const content = section === 'relationships'
-    ? {
-        kicker: 'Relationships',
-        title: '好友关系',
-        copy: '从共同在线和一起游玩的记录中查看好友之间的联系。',
-      }
-    : {
-        kicker: 'Discover',
-        title: '世界发现',
-        copy: '从好友去过的世界中发现新的去处。',
-      };
+function AnalysisLanding() {
+  const content = {
+    kicker: 'Relationships',
+    title: '好友关系',
+    copy: '从共同在线和一起游玩的记录中查看好友之间的联系。',
+  };
   return (
     <>
       <header className="page-heading">
@@ -95,6 +91,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
   const queryClient = useQueryClient();
   const {
     parameters,
+    update,
     route,
     routeKey,
     view,
@@ -104,7 +101,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
     navigateView,
   } = useHashRoute();
   usePageScrollRestoration(routeKey);
-  const [selectedFriend, setSelectedFriend] = useState<Friend | null>(null);
+  const [friendPreview, setFriendPreview] = useState<Friend | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [reconnectOpen, setReconnectOpen] = useState(false);
   const [reconnectTwoFactor, setReconnectTwoFactor] = useState(false);
@@ -203,6 +200,13 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
     relationships: '好友关系',
     discover: '世界发现',
   }[view];
+  const friendDetailId = parameters.get('personDetail');
+  const worldDetailId = parameters.get('worldDetail');
+  const openFriend = (friend: Friend) => {
+    setFriendPreview(friend);
+    update({ personDetail: friend.id, personTab: null });
+  };
+  const openWorld = (worldId: string) => update({ worldDetail: worldId });
 
   return (
     <AppShell
@@ -267,19 +271,29 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
           eventsFetching={eventsQuery.isFetching}
           onRetryPeople={() => void peopleQuery.refetch()}
           onRetryEvents={() => void eventsQuery.refetch()}
-          onOpenFriend={setSelectedFriend}
+          onOpenFriend={openFriend}
           onNavigatePeople={() => navigateView('people')}
           onNavigateHistory={() => navigateView('history')}
         />
       ) : null}
       {view === 'daily' && <DailyView />}
       {view === 'worlds' && <WorldsView />}
-      {view === 'people' && <PeopleView onOpenFriend={setSelectedFriend} />}
+      {view === 'discover' && <DiscoveryView onOpenWorld={openWorld} />}
+      {view === 'people' && <PeopleView onOpenFriend={openFriend} />}
       {view === 'history' && <HistoryView />}
       {view === 'data' && <DataView />}
-      {(view === 'relationships' || view === 'discover') && <AnalysisLanding section={view} />}
+      {view === 'relationships' && <AnalysisLanding />}
       {view === 'settings' && <SettingsView />}
-      <FriendDialog friend={selectedFriend} onClose={() => setSelectedFriend(null)} />
+      <FriendDialog
+        friendId={friendDetailId}
+        initialFriend={friendPreview?.id === friendDetailId ? friendPreview : null}
+        onClose={() => {
+          setFriendPreview(null);
+          update({ personDetail: null, personTab: null });
+        }}
+        onOpenWorld={openWorld}
+      />
+      <WorldDialog worldId={worldDetailId} onClose={() => update({ worldDetail: null })} />
       <VrchatReconnectDialog
         open={reconnectOpen}
         pending={reconnectMutation.isPending || reconnectTwoFactorMutation.isPending}

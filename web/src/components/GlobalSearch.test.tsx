@@ -33,7 +33,7 @@ describe('global search', () => {
         people: [{
           id: 'usr_a', username: 'alice', name: 'Alice', status: 'active',
           location: 'private', avatar_url: '', is_self: false, pinned: false,
-          tags: [], matches: ['current_name'], href: '#view=people&person=usr_a',
+          tags: [], matches: ['current_name'], href: '#view=people&personDetail=usr_a',
         }],
         worlds: [], history: [], destinations: [],
       },
@@ -46,7 +46,7 @@ describe('global search', () => {
     const option = await screen.findByRole('option', { name: /Alice/ });
     await user.click(option);
 
-    expect(window.location.hash).toBe('#view=people&person=usr_a');
+    expect(window.location.hash).toBe('#view=people&personDetail=usr_a');
   });
 
   it('offers recent destinations before a query and closes with Escape', async () => {
