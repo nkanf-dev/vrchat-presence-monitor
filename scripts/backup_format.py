@@ -39,6 +39,16 @@ COUNT_TABLES = (
     "friends",
     "status_events",
     "raw_fetches",
+    "collection_samples",
+    "friend_annotations",
+    "tags",
+    "friend_tags",
+    "friend_tracking_events",
+    "friend_identity_events",
+    "event_anomalies",
+    "tenant_preferences",
+    "world_cache",
+    "world_resolution_state",
 )
 _INSTANCE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")

@@ -159,8 +159,102 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_hosted_events_tenant_time ON status_events(tenant_id, occurred_at);
             CREATE TABLE IF NOT EXISTS raw_fetches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, occurred_at TEXT NOT NULL, method TEXT NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, client_fetch_id TEXT NOT NULL DEFAULT '',
+                occurred_at TEXT NOT NULL, method TEXT NOT NULL,
                 path TEXT NOT NULL, status_code INTEGER, content_type TEXT NOT NULL DEFAULT '', body BLOB NOT NULL DEFAULT X'', error TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS friend_annotations (
+                tenant_id TEXT NOT NULL,
+                friend_id TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0,1)),
+                revision TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, friend_id),
+                FOREIGN KEY(tenant_id, friend_id) REFERENCES friends(tenant_id, id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS tags (
+                tenant_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                name TEXT NOT NULL COLLATE NOCASE,
+                color TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, id),
+                UNIQUE(tenant_id, name),
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS friend_tags (
+                tenant_id TEXT NOT NULL,
+                friend_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, friend_id, tag_id),
+                FOREIGN KEY(tenant_id, friend_id) REFERENCES friends(tenant_id, id) ON DELETE CASCADE,
+                FOREIGN KEY(tenant_id, tag_id) REFERENCES tags(tenant_id, id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_friend_tags_tenant_tag
+                ON friend_tags(tenant_id, tag_id, friend_id);
+            CREATE TABLE IF NOT EXISTS collection_samples (
+                tenant_id TEXT NOT NULL,
+                sample_id TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                authoritative INTEGER NOT NULL CHECK(authoritative IN (0,1)),
+                expected_interval_seconds INTEGER NOT NULL,
+                friend_count INTEGER,
+                online_count INTEGER,
+                duration_ms INTEGER,
+                error_category TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(tenant_id, sample_id),
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_collection_samples_tenant_time
+                ON collection_samples(tenant_id, observed_at, sample_id);
+            CREATE TABLE IF NOT EXISTS friend_tracking_events (
+                tenant_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                friend_id TEXT NOT NULL,
+                tracked INTEGER NOT NULL CHECK(tracked IN (0,1)),
+                occurred_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, event_id),
+                FOREIGN KEY(tenant_id, friend_id) REFERENCES friends(tenant_id, id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_tracking_tenant_friend_time
+                ON friend_tracking_events(tenant_id, friend_id, occurred_at, event_id);
+            CREATE TABLE IF NOT EXISTS friend_identity_events (
+                tenant_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                friend_id TEXT NOT NULL,
+                field TEXT NOT NULL CHECK(field IN ('username','display_name')),
+                old_value TEXT NOT NULL,
+                new_value TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, event_id),
+                FOREIGN KEY(tenant_id, friend_id) REFERENCES friends(tenant_id, id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_identity_tenant_friend_time
+                ON friend_identity_events(tenant_id, friend_id, occurred_at, event_id);
+            CREATE TABLE IF NOT EXISTS event_anomalies (
+                tenant_id TEXT NOT NULL,
+                anomaly_id TEXT NOT NULL,
+                event_kind TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, anomaly_id),
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_anomalies_target
+                ON event_anomalies(tenant_id, event_kind, event_id);
+            CREATE TABLE IF NOT EXISTS tenant_preferences (
+                tenant_id TEXT PRIMARY KEY,
+                timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS vrchat_accounts (
@@ -184,6 +278,14 @@ class Store:
                 payload_json TEXT NOT NULL,
                 fetched_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS world_resolution_state (
+                world_id TEXT PRIMARY KEY,
+                outcome TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                retry_at TEXT,
+                error_category TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS portable_backup_usage (
                 tenant_id TEXT PRIMARY KEY,
                 friend_count INTEGER NOT NULL DEFAULT 0,
@@ -205,6 +307,23 @@ class Store:
             }
             if "previous_event_id" not in event_columns:
                 db.execute("ALTER TABLE status_events ADD COLUMN previous_event_id TEXT")
+            raw_fetch_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(raw_fetches)").fetchall()
+            }
+            if "client_fetch_id" not in raw_fetch_columns:
+                db.execute(
+                    "ALTER TABLE raw_fetches ADD COLUMN client_fetch_id TEXT NOT NULL DEFAULT ''"
+                )
+            self._backfill_raw_fetch_ids(db)
+            db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_fetches_tenant_client_id
+                ON raw_fetches(tenant_id,client_fetch_id)
+                WHERE client_fetch_id <> ''"""
+            )
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_raw_fetches_tenant_time
+                ON raw_fetches(tenant_id,occurred_at,id)"""
+            )
             account_columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(vrchat_accounts)").fetchall()
             }
@@ -257,6 +376,37 @@ class Store:
                     (now(),),
                 )
             self._rebuild_backup_usage(db)
+
+    @staticmethod
+    def _backfill_raw_fetch_ids(db: sqlite3.Connection) -> None:
+        """Give every legacy fetch an immutable ID without collapsing duplicates."""
+        rows = db.execute(
+            """SELECT id,occurred_at,method,path,status_code,content_type,body,error
+            FROM raw_fetches WHERE client_fetch_id='' OR client_fetch_id IS NULL
+            ORDER BY id"""
+        ).fetchall()
+        for row in rows:
+            body = bytes(row["body"] or b"")
+            error = str(row["error"] or "")
+            identity = json.dumps(
+                [
+                    int(row["id"]),
+                    str(row["occurred_at"]),
+                    str(row["method"]),
+                    str(row["path"]),
+                    row["status_code"],
+                    str(row["content_type"] or ""),
+                    hashlib.sha256(body).hexdigest(),
+                    hashlib.sha256(error.encode("utf-8")).hexdigest(),
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            client_fetch_id = "legacy_fetch_" + hashlib.sha256(identity).hexdigest()
+            db.execute(
+                "UPDATE raw_fetches SET client_fetch_id=? WHERE id=?",
+                (client_fetch_id, int(row["id"])),
+            )
 
     @staticmethod
     def _migrate_collector_prefixed_event_ids(db: sqlite3.Connection) -> None:
@@ -912,14 +1062,17 @@ class Store:
         body: bytes = b"",
         error: str = "",
     ) -> None:
+        client_fetch_id = "fetch_" + secrets.token_hex(32)
         with self.lock, self.connection() as db:
             self._require_tenant(db, tenant_id)
             db.execute(
                 """INSERT INTO raw_fetches(
-                    tenant_id,occurred_at,method,path,status_code,content_type,body,error
-                ) VALUES(?,?,?,?,?,?,?,?)""",
+                    tenant_id,client_fetch_id,occurred_at,method,path,status_code,
+                    content_type,body,error
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (
                     tenant_id,
+                    client_fetch_id,
                     now(),
                     self._text(method, 12),
                     self._text(path, 2048),
