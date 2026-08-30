@@ -1886,6 +1886,7 @@ class Store:
             "last_sync": last_sync,
             "collector_error": collector_error,
             "collector_state": collector_state,
+            "live": collector_state == "fresh",
             "sync_age_seconds": sync_age_seconds,
             "stale_after_seconds": max(30, int(stale_after_seconds)),
         }

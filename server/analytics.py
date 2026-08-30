@@ -17,9 +17,14 @@ from vrchat_monitor.vrchat import USER_AGENT, VRChatError
 
 from .observation import (
     TimeWindow,
+    activity_cell,
+    build_observed_windows,
     build_online_spans,
+    build_tracking_windows,
     build_world_spans,
+    coverage_summary,
     effective_state,
+    intersect_windows,
 )
 from .storage import Store
 
@@ -79,6 +84,53 @@ class AnalyticsService:
         return start, end
 
     @staticmethod
+    def _hour_window(
+        day: date_type,
+        hour: int,
+        zone: ZoneInfo,
+        current: datetime,
+    ) -> TimeWindow | None:
+        start = datetime.combine(day, time_type(hour=hour), tzinfo=zone)
+        if hour == 23:
+            end = datetime.combine(day + timedelta(days=1), time_type.min, tzinfo=zone)
+        else:
+            end = datetime.combine(day, time_type(hour=hour + 1), tzinfo=zone)
+        if day == current.date():
+            end = min(end, current)
+        if end.astimezone(timezone.utc) <= start.astimezone(timezone.utc):
+            return None
+        return TimeWindow(start, end)
+
+    @staticmethod
+    def _window_payload(window: TimeWindow) -> dict[str, Any]:
+        return {
+            "start": window.start.isoformat(timespec="microseconds"),
+            "end": window.end.isoformat(timespec="microseconds"),
+            "minutes": round(window.minutes, 1),
+        }
+
+    @classmethod
+    def _coverage_payload(
+        cls,
+        covered: list[TimeWindow],
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        summary = coverage_summary(covered, range_start=start, range_end=end)
+        return {
+            "expected_minutes": round(summary.expected_minutes, 1),
+            "observed_minutes": round(summary.observed_minutes, 1),
+            "ratio": round(summary.ratio, 4),
+            "first_observed": summary.first_observed.isoformat(timespec="microseconds")
+            if summary.first_observed
+            else None,
+            "last_observed": summary.last_observed.isoformat(timespec="microseconds")
+            if summary.last_observed
+            else None,
+            "gaps": [cls._window_payload(gap) for gap in summary.gaps],
+        }
+
+    @staticmethod
     def _effective_state(status: str, location: str, is_self: bool = False) -> str:
         return effective_state(status, location, is_self)
 
@@ -90,13 +142,14 @@ class AnalyticsService:
         end: datetime,
         zone: ZoneInfo,
         is_self: bool = False,
+        covered: list[TimeWindow] | None = None,
     ) -> list[dict[str, Any]]:
         if end <= start:
             return []
         query_start = start.astimezone(timezone.utc)
         spans = build_online_spans(
             events,
-            [TimeWindow(start.astimezone(zone), end.astimezone(zone))],
+            covered or [TimeWindow(start.astimezone(zone), end.astimezone(zone))],
             start,
             end,
             is_self=is_self,
@@ -118,12 +171,13 @@ class AnalyticsService:
         start: datetime,
         end: datetime,
         is_self: bool,
+        covered: list[TimeWindow] | None = None,
     ) -> float:
         if end <= start:
             return 0.0
         spans = build_online_spans(
             events,
-            [TimeWindow(start, end)],
+            covered or [TimeWindow(start, end)],
             start,
             end,
             is_self=is_self,
@@ -138,13 +192,14 @@ class AnalyticsService:
         end: datetime,
         zone: ZoneInfo,
         is_self: bool = False,
+        covered: list[TimeWindow] | None = None,
     ) -> list[dict[str, Any]]:
         if end <= start:
             return []
         query_start = start.astimezone(timezone.utc)
         spans = build_world_spans(
             events,
-            [TimeWindow(start.astimezone(zone), end.astimezone(zone))],
+            covered or [TimeWindow(start.astimezone(zone), end.astimezone(zone))],
             start,
             end,
             is_self=is_self,
@@ -157,6 +212,7 @@ class AnalyticsService:
                 "location": span.location,
                 "world_id": span.world_id,
                 "platform": span.platform,
+                "location_kind": span.location_kind,
             }
             for span in spans
         ]
@@ -169,21 +225,43 @@ class AnalyticsService:
         end: datetime,
         *,
         avatar: bool = False,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], tuple[int, str]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        dict[str, list[dict[str, Any]]],
+        tuple[Any, ...],
+    ]:
         start_key = start.astimezone(timezone.utc).isoformat(timespec="microseconds")
         end_key = end.astimezone(timezone.utc).isoformat(timespec="microseconds")
         avatar_column = ",avatar_url" if avatar else ""
+        sample_start_key = (
+            start.astimezone(timezone.utc) - timedelta(seconds=7260)
+        ).isoformat(timespec="microseconds")
         event_columns = (
             "client_event_id,friend_id,occurred_at,old_status,new_status,"
-            "location,platform,source"
+            "location,platform,source,anomaly,anomaly_reason"
+        )
+        event_select = (
+            "e.client_event_id,e.friend_id,e.occurred_at,e.old_status,e.new_status,"
+            "e.location,e.platform,e.source,"
+            "CASE WHEN EXISTS(SELECT 1 FROM event_anomalies a "
+            "WHERE a.tenant_id=e.tenant_id AND a.event_kind='status_event' "
+            "AND a.event_id=e.client_event_id) THEN 1 ELSE 0 END AS anomaly,"
+            "COALESCE((SELECT a.reason FROM event_anomalies a "
+            "WHERE a.tenant_id=e.tenant_id AND a.event_kind='status_event' "
+            "AND a.event_id=e.client_event_id ORDER BY a.detected_at LIMIT 1),'') "
+            "AS anomaly_reason"
         )
         with self.store.lock, self.store.connection() as db:
             self.store._require_tenant(db, tenant_id)
             revision_row = db.execute(
                 """SELECT COALESCE(MAX(rowid),0) AS event_revision,
-                COALESCE((SELECT MAX(updated_at) FROM friends WHERE tenant_id=?),'') AS friend_revision
+                COALESCE((SELECT MAX(updated_at) FROM friends WHERE tenant_id=?),'') AS friend_revision,
+                COALESCE((SELECT MAX(rowid) FROM collection_samples WHERE tenant_id=?),0) AS sample_revision,
+                COALESCE((SELECT MAX(rowid) FROM friend_tracking_events WHERE tenant_id=?),0) AS tracking_revision,
+                COALESCE((SELECT MAX(rowid) FROM event_anomalies WHERE tenant_id=?),0) AS anomaly_revision
                 FROM status_events WHERE tenant_id=?""",
-                (tenant_id, tenant_id),
+                (tenant_id, tenant_id, tenant_id, tenant_id, tenant_id),
             ).fetchone()
             friends = [
                 dict(row)
@@ -199,16 +277,16 @@ class AnalyticsService:
                 dict(row)
                 for row in db.execute(
                     f"""WITH prior AS (
-                        SELECT {event_columns},ROW_NUMBER() OVER (
+                        SELECT {event_select},ROW_NUMBER() OVER (
                             PARTITION BY friend_id
                             ORDER BY occurred_at DESC,client_event_id DESC
                         ) AS rank
-                        FROM status_events
-                        WHERE tenant_id=? AND occurred_at<?
+                        FROM status_events e
+                        WHERE e.tenant_id=? AND e.occurred_at<?
                     ),windowed AS (
-                        SELECT {event_columns}
-                        FROM status_events
-                        WHERE tenant_id=? AND occurred_at>=? AND occurred_at<?
+                        SELECT {event_select}
+                        FROM status_events e
+                        WHERE e.tenant_id=? AND e.occurred_at>=? AND e.occurred_at<?
                     )
                     SELECT {event_columns} FROM windowed
                     UNION ALL
@@ -217,11 +295,49 @@ class AnalyticsService:
                     (tenant_id, start_key, tenant_id, start_key, end_key),
                 ).fetchall()
             ]
+            samples = [
+                dict(row)
+                for row in db.execute(
+                    """SELECT sample_id,observed_at,source,outcome,authoritative,
+                    expected_interval_seconds,friend_count,online_count,duration_ms,
+                    error_category FROM collection_samples
+                    WHERE tenant_id=? AND observed_at>=? AND observed_at<=?
+                    ORDER BY observed_at,sample_id""",
+                    (tenant_id, sample_start_key, end_key),
+                ).fetchall()
+            ]
+            tracking = [
+                dict(row)
+                for row in db.execute(
+                    """WITH prior AS (
+                        SELECT event_id,friend_id,tracked,occurred_at,source,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY friend_id
+                            ORDER BY occurred_at DESC,event_id DESC
+                        ) AS rank
+                        FROM friend_tracking_events
+                        WHERE tenant_id=? AND occurred_at<?
+                    ),windowed AS (
+                        SELECT event_id,friend_id,tracked,occurred_at,source
+                        FROM friend_tracking_events
+                        WHERE tenant_id=? AND occurred_at>=? AND occurred_at<?
+                    )
+                    SELECT event_id,friend_id,tracked,occurred_at,source FROM windowed
+                    UNION ALL
+                    SELECT event_id,friend_id,tracked,occurred_at,source
+                    FROM prior WHERE rank=1
+                    ORDER BY friend_id,occurred_at,event_id""",
+                    (tenant_id, start_key, tenant_id, start_key, end_key),
+                ).fetchall()
+            ]
         revision = (
             int(revision_row["event_revision"] or 0),
             str(revision_row["friend_revision"] or ""),
+            int(revision_row["sample_revision"] or 0),
+            int(revision_row["tracking_revision"] or 0),
+            int(revision_row["anomaly_revision"] or 0),
         )
-        return friends, events, revision
+        return friends, events, {"samples": samples, "tracking": tracking}, revision
 
     @staticmethod
     def _group_events(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -234,16 +350,30 @@ class AnalyticsService:
         days = max(1, min(int(days), 90))
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
-        friends, events, _ = self._snapshot(tenant_id, start, end)
+        friends, events, evidence, _ = self._snapshot(tenant_id, start, end)
         grouped = self._group_events(events)
+        tracking_grouped = self._group_events(evidence["tracking"])
+        covered = build_observed_windows(
+            evidence["samples"], range_start=start, range_end=end
+        )
         totals: list[dict[str, Any]] = []
         online_now = 0
         for friend in friends:
             is_self = bool(friend["is_self"])
             if self._effective_state(friend["status"], friend["location"], is_self) != "offline":
                 online_now += 1
+            tracked = build_tracking_windows(
+                tracking_grouped.get(str(friend["id"]), []),
+                range_start=start,
+                range_end=end,
+            )
+            person_coverage = intersect_windows(covered, tracked)
             seconds = self._online_seconds(
-                grouped.get(str(friend["id"]), []), start, end, is_self
+                grouped.get(str(friend["id"]), []),
+                start,
+                end,
+                is_self,
+                person_coverage,
             )
             totals.append(
                 {
@@ -310,7 +440,9 @@ class AnalyticsService:
             min(selected, range_start), time_type.min, tzinfo=self.zone
         )
         query_end = self._day_bounds(max(selected, range_end), self.zone, current)[1]
-        friends, events, revision = self._snapshot(tenant_id, query_start, query_end)
+        friends, events, evidence, revision = self._snapshot(
+            tenant_id, query_start, query_end
+        )
         cache_key = (
             tenant_id,
             selected.isoformat(),
@@ -327,7 +459,21 @@ class AnalyticsService:
                 return result
 
         grouped = self._group_events(events)
+        tracking_grouped = self._group_events(evidence["tracking"])
         day_start, day_end = self._day_bounds(selected, self.zone, current)
+        range_query_start = datetime.combine(
+            range_start, time_type.min, tzinfo=self.zone
+        )
+        range_query_end = self._day_bounds(range_end, self.zone, current)[1]
+        all_coverage = build_observed_windows(
+            evidence["samples"], range_start=query_start, range_end=query_end
+        )
+        selected_coverage = intersect_windows(
+            all_coverage, [TimeWindow(day_start, day_end)]
+        )
+        range_coverage = intersect_windows(
+            all_coverage, [TimeWindow(range_query_start, range_query_end)]
+        )
         timeline: list[dict[str, Any]] = []
         heatmap: list[dict[str, Any]] = []
         completed_days = sum(
@@ -338,21 +484,35 @@ class AnalyticsService:
         observed_minutes = [0.0] * 24
         for offset in range(range_days):
             observed_day = range_start + timedelta(days=offset)
-            observed_start, observed_end = self._day_bounds(
-                observed_day, self.zone, current
-            )
             for hour in range(24):
-                hour_start = observed_start + timedelta(hours=hour)
-                hour_end = min(hour_start + timedelta(hours=1), observed_end)
-                observed_minutes[hour] += max(
-                    0.0, (hour_end - hour_start).total_seconds() / 60
+                hour_window = self._hour_window(
+                    observed_day, hour, self.zone, current
                 )
+                if hour_window is not None:
+                    observed_minutes[hour] += sum(
+                        window.minutes
+                        for window in intersect_windows(
+                            range_coverage, [hour_window]
+                        )
+                    )
         for friend in friends:
             friend_id = str(friend["id"])
             friend_events = grouped.get(friend_id, [])
+            friend_tracking = tracking_grouped.get(friend_id, [])
             is_self = bool(friend["is_self"])
+            selected_tracking = build_tracking_windows(
+                friend_tracking, range_start=day_start, range_end=day_end
+            )
+            selected_person_coverage = intersect_windows(
+                selected_coverage, selected_tracking
+            )
             selected_spans = self._online_spans(
-                friend_events, day_start, day_end, self.zone, is_self
+                friend_events,
+                day_start,
+                day_end,
+                self.zone,
+                is_self,
+                selected_person_coverage,
             )
             timeline.append(
                 {
@@ -370,37 +530,88 @@ class AnalyticsService:
                     ),
                 }
             )
-            total_minutes = [0.0] * 24
+            range_tracking = build_tracking_windows(
+                friend_tracking,
+                range_start=range_query_start,
+                range_end=range_query_end,
+            )
+            range_online = [
+                span.window
+                for span in build_online_spans(
+                    friend_events,
+                    range_coverage,
+                    range_query_start,
+                    range_query_end,
+                    is_self=is_self,
+                )
+            ]
+            online_by_hour = [0.0] * 24
+            observed_by_hour = [0.0] * 24
+            eligible_by_hour = [0.0] * 24
+            covered_days_by_hour = [0] * 24
             for offset in range(range_days):
                 current_day = range_start + timedelta(days=offset)
-                current_start, current_end = self._day_bounds(
-                    current_day, self.zone, current
-                )
-                spans = self._online_spans(
-                    friend_events, current_start, current_end, self.zone, is_self
-                )
                 for hour in range(24):
-                    hour_start = hour * 60
-                    hour_end = (hour + 1) * 60
-                    for span in spans:
-                        total_minutes[hour] += max(
-                            0,
-                            min(span["end_minute"], hour_end)
-                            - max(span["start_minute"], hour_start),
-                        )
+                    hour_window = self._hour_window(
+                        current_day, hour, self.zone, current
+                    )
+                    if hour_window is None:
+                        continue
+                    cell = activity_cell(
+                        online=range_online,
+                        covered=range_coverage,
+                        tracked=range_tracking,
+                        hour_start=hour_window.start,
+                        hour_end=hour_window.end,
+                    )
+                    online_by_hour[hour] += cell.online_minutes
+                    observed_by_hour[hour] += cell.observed_minutes
+                    eligible_by_hour[hour] += cell.eligible_minutes
+                    if cell.observed_minutes > 0:
+                        covered_days_by_hour[hour] += 1
+            cells: list[dict[str, Any]] = []
+            for hour in range(24):
+                minimum_evidence = max(30.0, eligible_by_hour[hour] * 0.1)
+                ratio = (
+                    min(1.0, online_by_hour[hour] / observed_by_hour[hour])
+                    if observed_by_hour[hour] >= minimum_evidence
+                    and observed_by_hour[hour] > 0
+                    else None
+                )
+                cells.append(
+                    {
+                        "ratio": round(ratio, 3) if ratio is not None else None,
+                        "online_minutes": round(online_by_hour[hour], 1),
+                        "observed_minutes": round(observed_by_hour[hour], 1),
+                        "eligible_minutes": round(eligible_by_hour[hour], 1),
+                        "covered_days": covered_days_by_hour[hour],
+                        "range_days": range_days,
+                    }
+                )
             heatmap.append(
                 {
                     "id": friend_id,
                     "name": str(friend["display_name"]),
+                    "is_self": is_self,
+                    "tracking_started_at": next(
+                        (
+                            str(item["occurred_at"])
+                            for item in friend_tracking
+                            if bool(item["tracked"])
+                        ),
+                        None,
+                    ),
+                    "cells": cells,
                     "values": [
-                        round(value / observed_minutes[hour], 3)
-                        if observed_minutes[hour] > 0
-                        else 0.0
-                        for hour, value in enumerate(total_minutes)
+                        cell["ratio"] if cell["ratio"] is not None else 0.0
+                        for cell in cells
                     ],
                 }
             )
 
+        selected_coverage_payload = self._coverage_payload(
+            selected_coverage, day_start, day_end
+        )
         result = {
             "day": selected.isoformat(),
             "days": range_days,
@@ -411,6 +622,11 @@ class AnalyticsService:
             "heatmap_complete_days": completed_days,
             "heatmap_observed_minutes": [round(value, 1) for value in observed_minutes],
             "timezone": self.zone.key,
+            "coverage": selected_coverage_payload,
+            "heatmap_coverage": self._coverage_payload(
+                range_coverage, range_query_start, range_query_end
+            ),
+            "gaps": selected_coverage_payload["gaps"],
             "timeline": timeline,
             "heatmap": heatmap,
         }
@@ -429,7 +645,7 @@ class AnalyticsService:
         future_clamped = selected > today
         selected = min(selected, today)
         day_start, day_end = self._day_bounds(selected, self.zone, current)
-        friends, events, revision = self._snapshot(
+        friends, events, evidence, revision = self._snapshot(
             tenant_id, day_start, day_end, avatar=True
         )
         cache_key = (tenant_id, selected.isoformat(), *revision)
@@ -442,16 +658,27 @@ class AnalyticsService:
                 return result
 
         grouped = self._group_events(events)
+        tracking_grouped = self._group_events(evidence["tracking"])
+        covered = build_observed_windows(
+            evidence["samples"], range_start=day_start, range_end=day_end
+        )
         rows: list[dict[str, Any]] = []
         world_ids: set[str] = set()
         for friend in friends:
             friend_id = str(friend["id"])
+            tracked = build_tracking_windows(
+                tracking_grouped.get(friend_id, []),
+                range_start=day_start,
+                range_end=day_end,
+            )
+            person_coverage = intersect_windows(covered, tracked)
             spans = self._world_spans(
                 grouped.get(friend_id, []),
                 day_start,
                 day_end,
                 self.zone,
                 bool(friend["is_self"]),
+                person_coverage,
             )
             world_ids.update(span["world_id"] for span in spans if span["world_id"])
             rows.append(
@@ -471,6 +698,7 @@ class AnalyticsService:
                     "spans": spans,
                 }
             )
+        coverage_payload = self._coverage_payload(covered, day_start, day_end)
         result = {
             "day": selected.isoformat(),
             "future_clamped": future_clamped,
@@ -478,12 +706,44 @@ class AnalyticsService:
             "self_id": next((row["id"] for row in rows if row["is_self"]), ""),
             "friends": rows,
             "world_ids": sorted(world_ids),
+            "coverage": coverage_payload,
+            "gaps": coverage_payload["gaps"],
         }
         with self._cache_lock:
             if len(self._world_cache) > 128:
                 self._world_cache.clear()
             self._world_cache[cache_key] = (time.monotonic(), result)
         return copy.deepcopy(result)
+
+    def coverage_overview(
+        self,
+        tenant_id: str,
+        range_from: str | None,
+        range_to: str | None,
+    ) -> dict[str, Any]:
+        current = datetime.now(self.zone)
+        today = current.date()
+        end_day = min(_parse_date(range_to, "结束日期") or today, today)
+        start_day = _parse_date(range_from, "起始日期") or end_day
+        if start_day > end_day:
+            raise ValueError("起始日期不能晚于结束日期")
+        range_days = (end_day - start_day).days + 1
+        if range_days > 730:
+            raise ValueError("范围不能超过 730 天")
+        start = datetime.combine(start_day, time_type.min, tzinfo=self.zone)
+        end = self._day_bounds(end_day, self.zone, current)[1]
+        _, _, evidence, _ = self._snapshot(tenant_id, start, end)
+        covered = build_observed_windows(
+            evidence["samples"], range_start=start, range_end=end
+        )
+        payload = self._coverage_payload(covered, start, end)
+        return {
+            "from": start_day.isoformat(),
+            "to": end_day.isoformat(),
+            "range_days": range_days,
+            "timezone": self.zone.key,
+            **payload,
+        }
 
 
 def _trusted_image_url(url: str) -> str:

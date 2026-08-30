@@ -44,6 +44,7 @@ const overviewSchema = z.object({
   last_sync: z.string().nullable(),
   collector_error: z.string(),
   collector_state: z.enum(['fresh', 'stale', 'error', 'never']),
+  live: z.boolean().default(false),
   sync_age_seconds: z.number().int().nonnegative().nullable(),
   stale_after_seconds: z.number().int().positive(),
 });
@@ -148,6 +149,30 @@ const presenceSpanSchema = z.object({
   status: z.string().default('active'),
 });
 
+const coverageGapSchema = z.object({
+  start: z.string(),
+  end: z.string(),
+  minutes: z.number().nonnegative(),
+});
+
+const coverageSchema = z.object({
+  expected_minutes: z.number().nonnegative(),
+  observed_minutes: z.number().nonnegative(),
+  ratio: z.number().min(0).max(1),
+  first_observed: z.string().nullable(),
+  last_observed: z.string().nullable(),
+  gaps: z.array(coverageGapSchema),
+});
+
+const activityCellSchema = z.object({
+  ratio: z.number().min(0).max(1).nullable(),
+  online_minutes: z.number().nonnegative(),
+  observed_minutes: z.number().nonnegative(),
+  eligible_minutes: z.number().nonnegative(),
+  covered_days: z.number().int().nonnegative(),
+  range_days: z.number().int().positive(),
+});
+
 const presenceAnalyticsSchema = z.object({
   day: z.string(),
   days: z.number().int().positive(),
@@ -158,6 +183,9 @@ const presenceAnalyticsSchema = z.object({
   heatmap_observed_minutes: z.array(z.number().nonnegative()).length(24),
   heatmap_complete_days: z.number().int().nonnegative(),
   timezone: z.string().default(''),
+  coverage: coverageSchema.optional(),
+  heatmap_coverage: coverageSchema.optional(),
+  gaps: z.array(coverageGapSchema).default([]),
   timeline: z.array(z.object({
     id: z.string(),
     name: z.string(),
@@ -169,6 +197,9 @@ const presenceAnalyticsSchema = z.object({
   heatmap: z.array(z.object({
     id: z.string(),
     name: z.string(),
+    is_self: z.boolean().default(false),
+    tracking_started_at: z.string().nullable().default(null),
+    cells: z.array(activityCellSchema).length(24).default([]),
     values: z.array(z.number().min(0).max(1)).default([]),
   })).default([]),
 });
@@ -177,6 +208,7 @@ const worldSpanSchema = presenceSpanSchema.extend({
   location: z.string().default(''),
   world_id: z.string().default(''),
   platform: z.string().default(''),
+  location_kind: z.enum(['world', 'private', 'traveling', 'hidden', 'offline']).default('hidden'),
 });
 
 const worldAnalyticsSchema = z.object({
@@ -194,6 +226,15 @@ const worldAnalyticsSchema = z.object({
     spans: z.array(worldSpanSchema).default([]),
   })).default([]),
   world_ids: z.array(z.string()).default([]),
+  coverage: coverageSchema.optional(),
+  gaps: z.array(coverageGapSchema).default([]),
+});
+
+const standaloneCoverageSchema = coverageSchema.extend({
+  from: z.string(),
+  to: z.string(),
+  range_days: z.number().int().positive(),
+  timezone: z.string(),
 });
 
 const optionalMetric = z.union([z.number(), z.string(), z.null()]).optional();
@@ -238,6 +279,7 @@ export type PresenceSpan = z.infer<typeof presenceSpanSchema>;
 export type WorldAnalytics = z.infer<typeof worldAnalyticsSchema>;
 export type WorldSpan = z.infer<typeof worldSpanSchema>;
 export type WorldInfo = z.infer<typeof worldInfoSchema>;
+export type Coverage = z.infer<typeof standaloneCoverageSchema>;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -453,6 +495,11 @@ export const getPresenceAnalytics = (options: {
 export const getWorldAnalytics = (day: string) => {
   const parameters = new URLSearchParams({ day });
   return request(`/v1/analytics/worlds?${parameters}`, worldAnalyticsSchema);
+};
+
+export const getCoverage = (rangeFrom: string, rangeTo: string) => {
+  const parameters = new URLSearchParams({ from: rangeFrom, to: rangeTo });
+  return request(`/v1/coverage?${parameters}`, standaloneCoverageSchema);
 };
 
 export const getWorld = (worldId: string) =>

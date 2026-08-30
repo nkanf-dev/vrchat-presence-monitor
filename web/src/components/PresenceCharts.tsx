@@ -162,8 +162,9 @@ export function PresenceHeatmap({
   const chartWidth = WIDTH - LEFT - 24;
   const cellWidth = chartWidth / 24;
   const hoveredRow = hover && hover.row >= 0 && hover.row < rows.length ? rows[hover.row] : null;
-  const hoveredValue = hoveredRow && hover ? hoveredRow.values[hover.hour] ?? 0 : 0;
-  const hoveredObserved = hover ? observedMinutes[hover.hour] ?? 0 : 0;
+  const hoveredCell = hoveredRow && hover ? hoveredRow.cells[hover.hour] : null;
+  const hoveredValue = hoveredCell?.ratio ?? (hoveredRow && hover ? hoveredRow.values[hover.hour] ?? 0 : 0);
+  const hoveredObserved = hoveredCell?.observed_minutes ?? (hover ? observedMinutes[hover.hour] ?? 0 : 0);
   const tooltipX = hover ? LEFT + cellWidth * (hover.hour + 0.5) : LEFT;
 
   return (
@@ -205,8 +206,9 @@ export function PresenceHeatmap({
                 {row.name}
               </text>
               {Array.from({ length: 24 }, (_, hour) => {
-                const value = row.values[hour] ?? 0;
-                const observed = (observedMinutes[hour] ?? 0) > 0;
+                const cell = row.cells[hour];
+                const value = cell?.ratio ?? row.values[hour] ?? 0;
+                const observed = cell ? cell.ratio !== null : (observedMinutes[hour] ?? 0) > 0;
                 const selected = hover?.row === rowIndex && hover.hour === hour;
                 return (
                   <g key={hour}>
@@ -238,8 +240,10 @@ export function PresenceHeatmap({
             lines={[
               `${hoveredRow.name} · ${String(hover.hour).padStart(2, '0')}:00–${String(hover.hour + 1).padStart(2, '0')}:00`,
               hoveredObserved > 0
-                ? `在线 ${Math.round(hoveredValue * 100)}% · 已观测 ${Math.round(hoveredObserved)} 分钟`
-                : '尚未到达 / 无观测',
+                ? hoveredCell?.ratio === null
+                  ? `记录覆盖 ${Math.round(hoveredObserved)} 分钟，暂不足以计算`
+                  : `在线 ${Math.round(hoveredValue * 100)}% · ${Math.round(hoveredCell?.online_minutes ?? 0)} / ${Math.round(hoveredObserved)} 分钟`
+                : '这个时段还没有记录',
             ]}
           />
         )}

@@ -478,6 +478,19 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @app.get("/v1/coverage")
+    def analytics_coverage(
+        range_from: str | None = Query(default=None, alias="from", max_length=10),
+        range_to: str | None = Query(default=None, alias="to", max_length=10),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        try:
+            return analytics.coverage_overview(
+                auth.row["tenant_id"], range_from, range_to
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.get("/v1/worlds/{world_id}")
     def world_info(
         world_id: str = PathParam(min_length=1, max_length=128),

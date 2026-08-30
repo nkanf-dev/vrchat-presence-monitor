@@ -12,7 +12,8 @@ const overview: Overview = {
   status_counts: { active: 1, offline: 3 },
   last_sync: '2026-08-27T12:00:00Z',
   collector_error: '',
-  collector_state: 'stale',
+      collector_state: 'stale',
+      live: false,
   sync_age_seconds: 900,
   stale_after_seconds: 300,
 };
