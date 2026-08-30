@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Database, Download, FileWarning, ShieldCheck, Upload, X } from 'lucide-react';
+import { Clock3, Database, Download, FileWarning, Tags, Upload, X } from 'lucide-react';
 import { ChangeEvent, useEffect, useRef, useState } from 'react';
 
 import { ApiError, downloadBackup, getCapabilities, importBackupFile } from '../api';
@@ -124,8 +124,17 @@ export function DataView() {
     mutationFn: (file: File) => importBackupFile(file),
     onSuccess: async (result) => {
       dialog.current?.close();
+      const extra = result.imported.friend_annotations
+        + result.imported.tags
+        + result.imported.friend_tags
+        + result.imported.friend_identity_events
+        + result.imported.friend_tracking_events
+        + result.imported.collection_samples
+        + result.imported.event_anomalies
+        + result.imported.tenant_preferences
+        + result.imported.raw_fetches;
       setMessage(
-        `导入完成：更新 ${result.imported.friends} 位玩家，新增 ${result.imported.events} 条历史记录。`,
+        `导入完成：合并 ${result.imported.friends} 位玩家、${result.imported.events} 条状态历史${extra ? `，以及 ${extra} 条整理与采集记录` : ''}。`,
       );
       setError('');
       setPreview(null);
@@ -245,7 +254,7 @@ export function DataView() {
         <div>
           <p className="kicker">Data ownership</p>
           <h1 tabIndex={-1}>数据与备份</h1>
-          <p>导出自己的规范化记录，或在确认预览后合并兼容备份。导入不会覆盖更新的数据。</p>
+          <p>下载一份完整备份，或将以前的备份合并到当前空间。</p>
         </div>
       </header>
 
@@ -256,7 +265,7 @@ export function DataView() {
           </span>
           <div>
             <h2>导出备份</h2>
-            <p>包含玩家快照与状态历史，不包含浏览器会话或 VRChat 登录信息。</p>
+            <p>包含玩家、状态历史、备注、标签、设置与采集记录。</p>
           </div>
           <button
             className="button button-primary"
@@ -353,25 +362,25 @@ export function DataView() {
       <section className="panel security-panel" aria-labelledby="data-boundary-title">
         <header className="panel-heading">
           <div>
-            <p className="kicker">What stays where</p>
-            <h2 id="data-boundary-title">数据边界</h2>
+            <p className="kicker">Backup contents</p>
+            <h2 id="data-boundary-title">备份内容</h2>
           </div>
         </header>
         <div className="boundary-grid">
           <div>
-            <ShieldCheck size={21} aria-hidden="true" />
-            <h3>浏览器登录</h3>
-            <p>保存在 HttpOnly Cookie 中，页面代码无法读取。退出只撤销当前设备的会话。</p>
+            <Clock3 size={21} aria-hidden="true" />
+            <h3>状态与世界</h3>
+            <p>好友快照、状态变化、世界位置、名称变化和采集时间都会一起保存。</p>
+          </div>
+          <div>
+            <Tags size={21} aria-hidden="true" />
+            <h3>备注与整理</h3>
+            <p>自己的备注、标签和显示偏好可以在另一套部署中继续使用。</p>
           </div>
           <div>
             <Database size={21} aria-hidden="true" />
-            <h3>监控数据</h3>
-            <p>由这个自托管实例保存，并按租户隔离。服务器管理员仍然掌握服务器与数据库。</p>
-          </div>
-          <div>
-            <FileWarning size={21} aria-hidden="true" />
-            <h3>备份文件</h3>
-            <p>可能包含好友、简介和活动位置。下载后由你负责保存与删除，不应提交到公开仓库。</p>
+            <h3>采集记录</h3>
+            <p>同步结果与原始响应也会保留，恢复后可以继续生成历史与统计。</p>
           </div>
         </div>
       </section>
@@ -428,7 +437,7 @@ export function DataView() {
             {preview.rawFetches > 0 && (
               <p className="privacy-warning">
                 <FileWarning size={18} aria-hidden="true" />
-                文件含 {preview.rawFetches.toLocaleString('zh-CN')} 条原始 API 响应；Hosted 只导入兼容的规范化数据。
+                这份备份还包含 {preview.rawFetches.toLocaleString('zh-CN')} 条原始采集记录，合并后会一并保留。
               </p>
             )}
             {error && <p className="form-error" role="alert">{error}</p>}

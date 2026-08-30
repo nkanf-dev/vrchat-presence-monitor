@@ -99,13 +99,29 @@ const eventPageSchema = z.object({
   offset: z.number().int().nonnegative(),
 });
 
+const importCountsSchema = z.object({
+  friends: z.number().int().nonnegative().default(0),
+  events: z.number().int().nonnegative().optional(),
+  status_events: z.number().int().nonnegative().optional(),
+  changed: z.number().int().nonnegative().default(0),
+  friend_annotations: z.number().int().nonnegative().default(0),
+  tags: z.number().int().nonnegative().default(0),
+  friend_tags: z.number().int().nonnegative().default(0),
+  friend_identity_events: z.number().int().nonnegative().default(0),
+  friend_tracking_events: z.number().int().nonnegative().default(0),
+  collection_samples: z.number().int().nonnegative().default(0),
+  event_anomalies: z.number().int().nonnegative().default(0),
+  tenant_preferences: z.number().int().nonnegative().default(0),
+  raw_fetches: z.number().int().nonnegative().default(0),
+}).transform((value) => ({
+  ...value,
+  events: value.events ?? value.status_events ?? 0,
+  status_events: value.status_events ?? value.events ?? 0,
+}));
+
 const importResultSchema = z.object({
   ok: z.literal(true),
-  imported: z.object({
-    friends: z.number().int().nonnegative().default(0),
-    events: z.number().int().nonnegative().default(0),
-    changed: z.number().int().nonnegative().default(0),
-  }),
+  imported: importCountsSchema,
 });
 
 const capabilitiesSchema = z.object({

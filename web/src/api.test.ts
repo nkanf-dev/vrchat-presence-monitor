@@ -12,6 +12,7 @@ import {
   login,
   loginVrchat,
   updateFriendAnnotation,
+  importBackupFile,
   verifyVrchat2fa,
 } from './api';
 
@@ -312,5 +313,29 @@ describe('hosted API client', () => {
       '/v1/discovery/worlds?days=7&include_self=false&tag_id=tag_a',
       expect.objectContaining({ credentials: 'same-origin' }),
     );
+  });
+
+  it('normalizes complete backup import counts for the UI', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, {
+      ok: true,
+      imported: {
+        friends: 2,
+        status_events: 17,
+        friend_annotations: 1,
+        tags: 3,
+        friend_tags: 4,
+        friend_identity_events: 2,
+        friend_tracking_events: 5,
+        collection_samples: 20,
+        event_anomalies: 0,
+        tenant_preferences: 1,
+        raw_fetches: 8,
+      },
+    })));
+
+    const result = await importBackupFile(new File(['{}'], 'backup.json', { type: 'application/json' }));
+
+    expect(result.imported.events).toBe(17);
+    expect(result.imported.raw_fetches).toBe(8);
   });
 });
