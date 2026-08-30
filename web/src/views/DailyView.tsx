@@ -69,7 +69,10 @@ export function DailyView() {
             onRetry={() => void result.refetch()}
           />
         ) : result.data.timeline.length ? (
-          <DailyTimelineChart rows={result.data.timeline} />
+          <DailyTimelineChart
+            rows={result.data.timeline}
+            {...(result.data.coverage ? { coverage: result.data.coverage } : {})}
+          />
         ) : (
           <div className="empty-state roomy">
             <CalendarRange size={28} aria-hidden="true" />
@@ -132,7 +135,7 @@ export function DailyView() {
         ) : (
           <div className="empty-state roomy">
             <CalendarRange size={28} aria-hidden="true" />
-            <strong>这个范围还没有观测数据</strong>
+            <strong>这个范围还没有记录</strong>
             <p>未来尚未到达的小时不会被当作离线记录。</p>
           </div>
         )}

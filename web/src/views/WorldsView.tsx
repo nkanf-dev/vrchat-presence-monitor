@@ -113,7 +113,13 @@ export function WorldsView() {
               </label>
             </header>
             {selectedPerson ? (
-              <PersonWorldChart person={selectedPerson} info={worldInfo} colors={colors} onOpenWorld={setOpenWorldId} />
+              <PersonWorldChart
+                person={selectedPerson}
+                info={worldInfo}
+                colors={colors}
+                {...(result.data.coverage ? { coverage: result.data.coverage } : {})}
+                onOpenWorld={setOpenWorldId}
+              />
             ) : (
               <div className="empty-state roomy">
                 <MapIcon size={28} aria-hidden="true" />
@@ -143,7 +149,14 @@ export function WorldsView() {
               <span>{result.data.timezone} · {people.length} 位追踪对象</span>
               <strong>{worldFilter ? `仅显示 ${worldName(worldFilter, worldInfo.get(worldFilter))}` : '点击条带或图例查看世界详情'}</strong>
             </div>
-            <EveryoneWorldChart people={people} info={worldInfo} colors={colors} worldFilter={worldFilter} onOpenWorld={setOpenWorldId} />
+            <EveryoneWorldChart
+              people={people}
+              info={worldInfo}
+              colors={colors}
+              worldFilter={worldFilter}
+              {...(result.data.coverage ? { coverage: result.data.coverage } : {})}
+              onOpenWorld={setOpenWorldId}
+            />
             <WorldLegend worldIds={worldIds} info={worldInfo} colors={colors} onOpen={setOpenWorldId} />
           </section>
         </>
