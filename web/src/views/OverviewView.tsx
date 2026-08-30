@@ -102,7 +102,7 @@ export function OverviewView({
         <div>
           <p className="kicker">Presence overview</p>
           <h1 tabIndex={-1}>状态总览</h1>
-          <p>最近一次采集快照与已保存历史。所有数字都来自完整统计，而不是当前列表页。</p>
+          <p>查看现在在线的玩家、最近变化和已经保存的历史。</p>
         </div>
         <span className="page-time">采集于 {formatDateTime(overview.last_sync)}</span>
       </header>
@@ -130,7 +130,7 @@ export function OverviewView({
           </span>
           <p>近 7 天变化</p>
           <strong>{formatNumber(overview.change_count_7d)}</strong>
-          <span>严格按最近 7×24 小时统计</span>
+          <span>最近 7 天的状态与位置变化</span>
         </article>
         <article className="metric-card">
           <span className="metric-icon" aria-hidden="true">
@@ -138,7 +138,7 @@ export function OverviewView({
           </span>
           <p>历史记录</p>
           <strong>{formatNumber(overview.event_total)}</strong>
-          <span>完整总数，不受分页影响</span>
+          <span>已经保存的状态变化</span>
         </article>
       </section>
 

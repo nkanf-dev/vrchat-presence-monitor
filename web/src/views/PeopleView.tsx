@@ -75,7 +75,7 @@ export function PeopleView({ onOpenFriend }: { onOpenFriend: (friend: Friend) =>
         <div>
           <p className="kicker">People</p>
           <h1 tabIndex={-1}>玩家列表</h1>
-          <p>搜索全部已追踪好友与自己的账号；点击玩家可查看公开资料和技术详情。</p>
+          <p>搜索好友与自己的账号；点击玩家可查看活动、世界、名称、备注和标签。</p>
         </div>
       </header>
 
