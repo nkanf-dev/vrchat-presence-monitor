@@ -75,6 +75,12 @@ services:
     pids_limit: 64
     mem_limit: 64m
     cpus: 0.25
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; connection=socket.create_connection(('172.18.0.1',17890),timeout=3); connection.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     logging:
       driver: json-file
       options:
