@@ -71,4 +71,55 @@ describe('backup preview worker entry point', () => {
     });
     expect(result.upload.size).toBeLessThan(1024);
   });
+
+  it('returns the original v3 gzip with complete collection counts', async () => {
+    const postMessage = vi.fn();
+    const scope: {
+      postMessage: typeof postMessage;
+      onmessage?: (event: MessageEvent) => Promise<void>;
+    } = { postMessage };
+    vi.stubGlobal('self', scope);
+    await import('./backup-preview.worker');
+
+    const file = compressedBrowserFile({
+      format: 'vrchat-monitor-hosted-backup',
+      version: 3,
+      scope: 'full',
+      exported_at: '2026-08-29T12:00:00+00:00',
+      friends: [{ id: 'usr_1' }],
+      status_events: [],
+      friend_annotations: [],
+      tags: [{ id: 'tag_1' }],
+      friend_tags: [],
+      friend_identity_events: [],
+      friend_tracking_events: [],
+      collection_samples: [{ sample_id: 'sample_1' }],
+      event_anomalies: [],
+      tenant_preferences: [{ timezone: 'Asia/Shanghai' }],
+      raw_fetches: [{ client_fetch_id: 'fetch_1', body_b64: 'z'.repeat(1024 * 1024) }],
+    });
+    await scope.onmessage?.(new MessageEvent('message', {
+      data: {
+        file,
+        maximum: 4 * 1024 * 1024,
+        maximumSourceExpanded: 8 * 1024 * 1024,
+        maximumServerExpanded: 8 * 1024 * 1024,
+      },
+    }));
+
+    const result = postMessage.mock.calls[0]?.[0];
+    expect(result).toMatchObject({
+      ok: true,
+      preview: {
+        version: 3,
+        scope: 'full',
+        friends: 1,
+        tags: 1,
+        collectionSamples: 1,
+        rawFetches: 1,
+      },
+    });
+    expect(result.upload.name).toBe(file.name);
+    expect(result.upload.size).toBe(file.size);
+  });
 });

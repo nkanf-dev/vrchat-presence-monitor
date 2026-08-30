@@ -1,6 +1,6 @@
 import { JSONParser, TokenType } from '@streamparser/json';
 
-import { summarizeBackup } from './backup';
+import { summarizeBackup, type BackupPreview } from './backup';
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -17,6 +17,7 @@ type StreamedBackup = {
   format?: JsonValue;
   version?: JsonValue;
   exportedAt?: JsonValue;
+  scope?: JsonValue;
   friendChunks: string[];
   friendBuffer: string[];
   eventChunks: string[];
@@ -24,9 +25,28 @@ type StreamedBackup = {
   friendCount: number;
   eventCount: number;
   rawFetchCount: number;
-  hasFriendsArray: boolean;
-  hasEventsArray: boolean;
+  counts: Record<V3ArrayField, number>;
+  seenArrays: Set<V3ArrayField>;
 };
+
+const V3_ARRAY_FIELDS = [
+  'friends',
+  'status_events',
+  'friend_annotations',
+  'tags',
+  'friend_tags',
+  'friend_identity_events',
+  'friend_tracking_events',
+  'collection_samples',
+  'event_anomalies',
+  'tenant_preferences',
+  'raw_fetches',
+] as const;
+
+type V3ArrayField = (typeof V3_ARRAY_FIELDS)[number];
+
+const isV3ArrayField = (value: unknown): value is V3ArrayField =>
+  typeof value === 'string' && (V3_ARRAY_FIELDS as readonly string[]).includes(value);
 
 const NORMALIZED_CHUNK_RECORDS = 512;
 const QUOTE = 0x22;
@@ -42,11 +62,8 @@ const isWhitespace = (byte: number) =>
   byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
 
 /**
- * Removes the intentionally unsupported raw response array before the JSON
- * library sees it.  Raw bodies can contain very large Base64 strings; feeding
- * those strings to a normal SAX parser still materializes each complete value.
- * This scanner only retains a bounded top-level key and balances the skipped
- * array, so memory use is independent of an individual raw response body.
+ * Counts raw response entries while keeping large Base64 bodies out of the SAX
+ * parser. The source file itself is never changed; v3 uploads reuse it intact.
  */
 class RawFetchRedactor {
   private depth = 0;
@@ -65,6 +82,10 @@ class RawFetchRedactor {
   private rawExpectElement = true;
   private rawSawElement = false;
   rawFetchCount = 0;
+
+  get rootFields() {
+    return new Set(this.topLevelKeys);
+  }
 
   private finishTopLevelKey() {
     let key: unknown;
@@ -109,6 +130,7 @@ class RawFetchRedactor {
       return false;
     }
     if (atArrayRoot && this.rawExpectElement) {
+      if (byte !== LEFT_BRACE) throw new Error('raw response entry must be an object');
       this.rawFetchCount += 1;
       this.rawSawElement = true;
       this.rawExpectElement = false;
@@ -216,11 +238,21 @@ export type NormalizedBackupResult =
   | {
       ok: true;
       preview: {
-        format: string;
-        exportedAt: string;
-        friends: number;
-        events: number;
-        rawFetches: number;
+        format: BackupPreview['format'];
+        exportedAt: BackupPreview['exportedAt'];
+        friends: BackupPreview['friends'];
+        events: BackupPreview['events'];
+        rawFetches: BackupPreview['rawFetches'];
+        version?: BackupPreview['version'];
+        scope?: BackupPreview['scope'];
+        friendAnnotations?: BackupPreview['friendAnnotations'];
+        tags?: BackupPreview['tags'];
+        friendTags?: BackupPreview['friendTags'];
+        friendIdentityEvents?: BackupPreview['friendIdentityEvents'];
+        friendTrackingEvents?: BackupPreview['friendTrackingEvents'];
+        collectionSamples?: BackupPreview['collectionSamples'];
+        eventAnomalies?: BackupPreview['eventAnomalies'];
+        tenantPreferences?: BackupPreview['tenantPreferences'];
       };
       upload: File;
     }
@@ -250,8 +282,11 @@ async function parseBackup(file: BackupFile, maximumExpanded: number): Promise<S
     friendCount: 0,
     eventCount: 0,
     rawFetchCount: 0,
-    hasFriendsArray: false,
-    hasEventsArray: false,
+    counts: Object.fromEntries(V3_ARRAY_FIELDS.map((field) => [field, 0])) as Record<
+      V3ArrayField,
+      number
+    >,
+    seenArrays: new Set<V3ArrayField>(),
   };
   let invalidItem = false;
   let rootIsObject = false;
@@ -266,8 +301,17 @@ async function parseBackup(file: BackupFile, maximumExpanded: number): Promise<S
       '$.format',
       '$.version',
       '$.exported_at',
+      '$.scope',
       '$.friends.*',
       '$.status_events.*',
+      '$.friend_annotations.*',
+      '$.tags.*',
+      '$.friend_tags.*',
+      '$.friend_identity_events.*',
+      '$.friend_tracking_events.*',
+      '$.collection_samples.*',
+      '$.event_anomalies.*',
+      '$.tenant_preferences.*',
     ],
     keepStack: false,
     stringBufferSize: 64 * 1024,
@@ -277,8 +321,9 @@ async function parseBackup(file: BackupFile, maximumExpanded: number): Promise<S
       if (containers.length === 0) rootIsObject = true;
       containers.push({ kind: 'object', keys: new Set<string>(), expectingKey: true });
     } else if (token === TokenType.LEFT_BRACKET) {
-      if (containers.length === 1 && topLevelKey === 'friends') result.hasFriendsArray = true;
-      if (containers.length === 1 && topLevelKey === 'status_events') result.hasEventsArray = true;
+      if (containers.length === 1 && isV3ArrayField(topLevelKey)) {
+        result.seenArrays.add(topLevelKey);
+      }
       containers.push({ kind: 'array' });
     } else if (token === TokenType.RIGHT_BRACE || token === TokenType.RIGHT_BRACKET) {
       containers.pop();
@@ -304,22 +349,35 @@ async function parseBackup(file: BackupFile, maximumExpanded: number): Promise<S
     if (stack.length === 1 && key === 'format') result.format = value as JsonValue;
     else if (stack.length === 1 && key === 'version') result.version = value as JsonValue;
     else if (stack.length === 1 && key === 'exported_at') result.exportedAt = value as JsonValue;
+    else if (stack.length === 1 && key === 'scope') result.scope = value as JsonValue;
     else if (parentKey === 'friends') {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         invalidItem = true;
         return;
       }
-      const encoded = JSON.stringify(value);
-      appendRecord(result.friendChunks, result.friendBuffer, encoded, result.friendCount);
+      if (result.version !== 3) {
+        const encoded = JSON.stringify(value);
+        appendRecord(result.friendChunks, result.friendBuffer, encoded, result.friendCount);
+      }
       result.friendCount += 1;
+      result.counts.friends += 1;
     } else if (parentKey === 'status_events') {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         invalidItem = true;
         return;
       }
-      const encoded = JSON.stringify(value);
-      appendRecord(result.eventChunks, result.eventBuffer, encoded, result.eventCount);
+      if (result.version !== 3) {
+        const encoded = JSON.stringify(value);
+        appendRecord(result.eventChunks, result.eventBuffer, encoded, result.eventCount);
+      }
       result.eventCount += 1;
+      result.counts.status_events += 1;
+    } else if (isV3ArrayField(parentKey) && parentKey !== 'raw_fetches') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        invalidItem = true;
+        return;
+      }
+      result.counts[parentKey] += 1;
     }
   };
 
@@ -338,7 +396,25 @@ async function parseBackup(file: BackupFile, maximumExpanded: number): Promise<S
   } finally {
     reader.releaseLock();
   }
-  if (!rootIsObject || invalidItem || !result.hasFriendsArray || !result.hasEventsArray) {
+  result.counts.raw_fetches = redactor.rawFetchCount;
+  const hasLegacyArrays =
+    result.seenArrays.has('friends') && result.seenArrays.has('status_events');
+  const hasV3Arrays = V3_ARRAY_FIELDS.every((field) => result.seenArrays.has(field));
+  const expectedV3Root = new Set([
+    'format',
+    'version',
+    'scope',
+    'exported_at',
+    ...V3_ARRAY_FIELDS,
+  ]);
+  const hasExactV3Root =
+    redactor.rootFields.size === expectedV3Root.size
+    && [...expectedV3Root].every((field) => redactor.rootFields.has(field));
+  if (
+    !rootIsObject
+    || invalidItem
+    || (result.version === 3 ? !hasV3Arrays || !hasExactV3Root : !hasLegacyArrays)
+  ) {
     throw new Error('invalid backup shape');
   }
   result.rawFetchCount = redactor.rawFetchCount;
@@ -370,10 +446,50 @@ export async function normalizeBackupFile(
       format: streamed.format,
       version: streamed.version,
       exported_at: streamed.exportedAt,
+      scope: streamed.scope,
       friends: [],
       status_events: [],
+      friend_annotations: [],
+      tags: [],
+      friend_tags: [],
+      friend_identity_events: [],
+      friend_tracking_events: [],
+      collection_samples: [],
+      event_anomalies: [],
+      tenant_preferences: [],
+      raw_fetches: [],
     });
     if (!summary.ok) return { ...summary, reason: 'invalid' };
+    if (streamed.version === 3) {
+      if (streamed.scope === 'normalized' && streamed.counts.raw_fetches > 0) {
+        return { ok: false, reason: 'invalid' };
+      }
+      if (
+        streamed.expandedBytes > maximumServerExpanded
+        || file.size > maximum
+        || !(file instanceof File)
+      ) {
+        return { ok: false, reason: 'normalized-too-large' };
+      }
+      return {
+        ok: true,
+        preview: {
+          ...summary.preview,
+          friends: streamed.counts.friends,
+          events: streamed.counts.status_events,
+          friendAnnotations: streamed.counts.friend_annotations,
+          tags: streamed.counts.tags,
+          friendTags: streamed.counts.friend_tags,
+          friendIdentityEvents: streamed.counts.friend_identity_events,
+          friendTrackingEvents: streamed.counts.friend_tracking_events,
+          collectionSamples: streamed.counts.collection_samples,
+          eventAnomalies: streamed.counts.event_anomalies,
+          tenantPreferences: streamed.counts.tenant_preferences,
+          rawFetches: streamed.counts.raw_fetches,
+        },
+        upload: file,
+      };
+    }
     const normalized = new File(
       [
         '{"format":',

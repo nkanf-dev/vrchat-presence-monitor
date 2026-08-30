@@ -73,6 +73,66 @@ function compressedBrowserFile(payload: unknown, name = 'backup.json.gz') {
 }
 
 describe('streaming backup normalization', () => {
+  it('previews every v3 collection and uploads the original gzip unchanged', async () => {
+    const source = {
+      format: 'vrchat-monitor-hosted-backup',
+      version: 3,
+      scope: 'full',
+      exported_at: '2026-08-29T12:00:00+00:00',
+      friends: [{ id: 'usr_1', display_name: 'Alice' }],
+      status_events: [{ client_event_id: 'event_1', friend_id: 'usr_1' }],
+      friend_annotations: [{ friend_id: 'usr_1', revision: 'revision_1' }],
+      tags: [{ id: 'tag_1' }, { id: 'tag_2' }],
+      friend_tags: [{ friend_id: 'usr_1', tag_id: 'tag_1' }],
+      friend_identity_events: [{ event_id: 'identity_1', friend_id: 'usr_1' }],
+      friend_tracking_events: [{ event_id: 'tracking_1', friend_id: 'usr_1' }],
+      collection_samples: [{ sample_id: 'sample_1' }, { sample_id: 'sample_2' }],
+      event_anomalies: [{ anomaly_id: 'anomaly_1' }],
+      tenant_preferences: [{ timezone: 'Asia/Shanghai' }],
+      raw_fetches: [{ client_fetch_id: 'fetch_1', body_b64: 'z'.repeat(2 * 1024 * 1024) }],
+    };
+    const compressed = compressedBrowserFile(source, 'complete-v3.json.gz');
+
+    const result = await normalizeBackupFile(compressed, 4 * 1024 * 1024, 8 * 1024 * 1024);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.preview).toEqual({
+      format: 'vrchat-monitor-hosted-backup',
+      version: 3,
+      scope: 'full',
+      exportedAt: '2026-08-29T12:00:00+00:00',
+      friends: 1,
+      events: 1,
+      friendAnnotations: 1,
+      tags: 2,
+      friendTags: 1,
+      friendIdentityEvents: 1,
+      friendTrackingEvents: 1,
+      collectionSamples: 2,
+      eventAnomalies: 1,
+      tenantPreferences: 1,
+      rawFetches: 1,
+    });
+    expect(result.upload).toBe(compressed);
+    expect(result.upload.name).toBe(compressed.name);
+    expect(result.upload.size).toBe(compressed.size);
+  });
+
+  it('rejects a v3 file with a missing ledger array', async () => {
+    const source = {
+      format: 'vrchat-monitor-hosted-backup',
+      version: 3,
+      scope: 'normalized',
+      friends: [],
+      status_events: [],
+    };
+
+    await expect(
+      normalizeBackupFile(streamedFile(source), 10_000, 10_000),
+    ).resolves.toMatchObject({ ok: false, reason: 'invalid' });
+  });
+
   it('drops raw fetches without retaining the full source document', async () => {
     const source = {
       format: 'vrchat-monitor-backup',

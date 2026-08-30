@@ -7,6 +7,7 @@ import re
 import secrets
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -2040,6 +2041,23 @@ class Store:
         with self.lock, self.connection() as db:
             db.execute("BEGIN")
             return self._backup_payload(db, tenant_id)
+
+    def stream_export_v3(
+        self, tenant_id: str, include_raw: bool = True
+    ) -> Iterator[bytes]:
+        from .backup_v3 import stream_tenant_backup
+
+        return stream_tenant_backup(self, tenant_id, include_raw)
+
+    def import_v3(
+        self,
+        tenant_id: str,
+        raw: bytes,
+        maximum_expanded: int,
+    ) -> dict[str, int]:
+        from .backup_v3 import import_tenant_backup
+
+        return import_tenant_backup(self, tenant_id, raw, maximum_expanded)
 
     def import_json(self, tenant_id: str, payload: dict[str, Any]) -> dict[str, int]:
         backup_format = payload.get("format")

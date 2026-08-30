@@ -13,7 +13,11 @@ self.onmessage = async (event: MessageEvent<PreviewRequest>) => {
     self.postMessage({ ok: false, reason: 'invalid' });
     return;
   }
-  self.postMessage(
-    await normalizeBackupFile(file, maximum, maximumSourceExpanded, maximumServerExpanded),
+  const result = await normalizeBackupFile(
+    file,
+    maximum,
+    maximumSourceExpanded,
+    maximumServerExpanded,
   );
+  self.postMessage(result);
 };

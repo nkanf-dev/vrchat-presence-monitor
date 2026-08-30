@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import io
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, BinaryIO
@@ -211,6 +212,14 @@ class _BoundedBuilder:
 
 def decode_backup(raw: bytes, maximum_expanded: int) -> dict[str, Any]:
     """Stream-decode one compatible backup into a bounded import payload."""
+    builder = _BoundedBuilder()
+    for event, value in iter_backup_events(raw, maximum_expanded):
+        builder.consume(event, value)
+    return builder.result()
+
+
+def iter_backup_events(raw: bytes, maximum_expanded: int) -> Iterator[tuple[str, Any]]:
+    """Yield bounded JSON events from plain or gzip backup bytes."""
     compressed = raw.startswith(b"\x1f\x8b")
     source: BinaryIO
     if compressed:
@@ -218,11 +227,9 @@ def decode_backup(raw: bytes, maximum_expanded: int) -> dict[str, Any]:
     else:
         source = io.BytesIO(raw)
     limited = _LimitedReader(source, maximum_expanded)
-    builder = _BoundedBuilder()
     try:
         for event, value in ijson.basic_parse(limited):
-            builder.consume(event, value)
-        return builder.result()
+            yield event, value
     except _ExpandedBackupTooLarge as error:
         raise ValueError("备份解压后过大") from error
     except (EOFError, OSError) as error:
@@ -232,5 +239,44 @@ def decode_backup(raw: bytes, maximum_expanded: int) -> dict[str, Any]:
     except ijson.JSONError as error:
         raise ValueError("备份文件不是有效 JSON") from error
     finally:
-        if compressed:
-            source.close()
+        source.close()
+
+
+def read_backup_manifest(raw: bytes, maximum_expanded: int) -> dict[str, Any]:
+    """Read the leading format/version fields without retaining collection rows."""
+    events = iter_backup_events(raw, maximum_expanded)
+    manifest: dict[str, Any] = {}
+    try:
+        event, _ = next(events)
+        if event != "start_map":
+            raise ValueError("备份文件格式无效")
+        while True:
+            event, value = next(events)
+            if event == "end_map":
+                break
+            if event != "map_key" or not isinstance(value, str):
+                raise ValueError("备份文件不是有效 JSON")
+            key = value
+            value_event, scalar = next(events)
+            if value_event in {"string", "number", "boolean", "null"}:
+                if isinstance(scalar, Decimal):
+                    scalar = float(scalar)
+                if key in {"format", "version", "scope", "exported_at"}:
+                    manifest[key] = scalar
+                if "format" in manifest and "version" in manifest:
+                    return manifest
+                continue
+            if value_event not in {"start_map", "start_array"}:
+                raise ValueError("备份文件不是有效 JSON")
+            depth = 1
+            while depth:
+                nested_event, _ = next(events)
+                if nested_event in {"start_map", "start_array"}:
+                    depth += 1
+                elif nested_event in {"end_map", "end_array"}:
+                    depth -= 1
+        return manifest
+    except StopIteration as error:
+        raise ValueError("备份文件不是有效 JSON") from error
+    finally:
+        events.close()

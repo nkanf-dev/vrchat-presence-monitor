@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import gzip
-import json
 import logging
 import secrets
 import shutil
@@ -24,14 +22,17 @@ from fastapi import (
 )
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from vrchat_monitor.vrchat import VRChatError, VRChatLoginResult
 
 from .analytics import AnalyticsService, fetch_world_image
-from .backup_json import decode_backup as _decode_backup
+from .backup_json import (
+    decode_backup as _decode_backup,
+    read_backup_manifest as _read_backup_manifest,
+)
 from .hosted_collector import HostedCollectorManager
 from .schemas import (
     BootstrapRequest,
@@ -57,7 +58,7 @@ from .security import (
 )
 from .session_crypto import SessionCipher
 from .settings import Settings
-from .storage import BACKUP_COMPRESSION_MARGIN, Store
+from .storage import Store
 from .vrchat_auth import VRChatAuthService
 
 
@@ -584,37 +585,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         }
 
     @app.get("/v1/export.json")
-    def export_json(auth: Authenticated = Depends(viewer)) -> Response:
-        payload = database.export_json(auth.row["tenant_id"])
-        filename = f"presence-monitor-backup-{time.strftime('%Y-%m-%d', time.gmtime())}.json"
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(encoded) <= config.max_import_bytes:
-            return Response(
-                content=encoded,
-                media_type="application/json",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-            )
-        if len(encoded) > config.max_import_expanded_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "当前数据超过服务器直接恢复上限；请使用部署者的 SQLite/R2 备份，"
-                    "或提高 MAX_IMPORT_EXPANDED_BYTES 后从直连端点导出"
-                ),
-            )
-        compressed = gzip.compress(encoded, compresslevel=9, mtime=0)
-        if len(compressed) > config.max_import_bytes - BACKUP_COMPRESSION_MARGIN:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "压缩备份仍超过上传上限；请使用部署者的 SQLite/R2 备份，"
-                    "或提高容量后从直连端点导出"
-                ),
-            )
-        return Response(
-            content=compressed,
+    def export_json(
+        include_raw: bool = Query(default=True),
+        auth: Authenticated = Depends(viewer),
+    ) -> StreamingResponse:
+        filename = (
+            f"presence-monitor-backup-{time.strftime('%Y-%m-%d', time.gmtime())}.json.gz"
+        )
+        return StreamingResponse(
+            database.stream_export_v3(auth.row["tenant_id"], include_raw),
             media_type="application/gzip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}.gz"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
     @app.post("/v1/import.json")
@@ -631,15 +612,36 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             )
         raw = await _read_bytes(request, config.max_import_bytes)
         try:
-            payload = await run_in_threadpool(
-                _decode_backup,
+            manifest = await run_in_threadpool(
+                _read_backup_manifest,
                 raw,
                 config.max_import_expanded_bytes,
             )
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
         try:
-            imported = await run_in_threadpool(database.import_json, auth.row["tenant_id"], payload)
+            if (
+                manifest.get("format") == "vrchat-monitor-hosted-backup"
+                and manifest.get("version") == 3
+                and not isinstance(manifest.get("version"), bool)
+            ):
+                imported = await run_in_threadpool(
+                    database.import_v3,
+                    auth.row["tenant_id"],
+                    raw,
+                    config.max_import_expanded_bytes,
+                )
+            else:
+                payload = await run_in_threadpool(
+                    _decode_backup,
+                    raw,
+                    config.max_import_expanded_bytes,
+                )
+                imported = await run_in_threadpool(
+                    database.import_json,
+                    auth.row["tenant_id"],
+                    payload,
+                )
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
         return {"ok": True, "imported": imported}
