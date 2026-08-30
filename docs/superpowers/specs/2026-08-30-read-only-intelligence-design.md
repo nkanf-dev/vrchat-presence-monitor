@@ -247,7 +247,7 @@ length rather than assuming 1,440 minutes.
 
 Add versioned, idempotent migrations for these tenant-scoped tables:
 
-- `friend_annotations(tenant_id, friend_id, note, pinned, updated_at)`;
+- `friend_annotations(tenant_id, friend_id, note, pinned, revision, updated_at)`;
 - `tags(tenant_id, id, name, color, created_at, updated_at)`;
 - `friend_tags(tenant_id, friend_id, tag_id, created_at)`;
 - `friend_identity_events(tenant_id, event_id, friend_id, field, old_value,
@@ -261,9 +261,15 @@ Add versioned, idempotent migrations for these tenant-scoped tables:
   detected_at)`;
 - `tenant_preferences(tenant_id, timezone, updated_at)`.
 
+Add global `world_resolution_state(world_id, outcome, attempts, retry_at,
+error_category, updated_at)` beside the existing public world cache so restart cannot
+erase a 429/backoff deadline and trigger an immediate retry loop.
+
 The existing `raw_fetches` table gains a tenant-scoped stable `client_fetch_id`.
-Existing rows receive deterministic IDs from request metadata plus body/error hashes,
-allowing repeated imports to remain idempotent without trusting local integer IDs.
+Existing rows receive deterministic IDs from their legacy row identity, request
+metadata, and body/error hashes so identical fetches remain distinct while repeated
+imports stay idempotent without trusting a destination database's integer IDs. New
+rows receive a stored random stable ID at insertion.
 
 All foreign keys include the tenant boundary. Every query derives `tenant_id` from
 the authenticated viewer or collector; IDs in paths cannot select a different
