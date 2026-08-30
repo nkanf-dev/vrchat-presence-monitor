@@ -260,7 +260,190 @@ const worldInfoSchema = z.object({
   publication_date: z.string().default(''),
   created_at: z.string().default(''),
   updated_at: z.string().default(''),
+  resolution_status: z.enum(['ready', 'pending', 'unavailable', 'queued', 'retry']).optional(),
 }).passthrough();
+
+const tagSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  color: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  friend_count: z.number().int().nonnegative().optional(),
+});
+
+const annotationSchema = z.object({
+  friend_id: z.string(),
+  note: z.string(),
+  pinned: z.boolean(),
+  revision: z.string().nullable(),
+  updated_at: z.string().nullable(),
+  tags: z.array(tagSchema),
+});
+
+const identityEventSchema = z.object({
+  event_id: z.string(),
+  field: z.enum(['username', 'display_name']),
+  old_value: z.string(),
+  new_value: z.string(),
+  occurred_at: z.string(),
+  source: z.string(),
+});
+
+const friendInsightSchema = z.object({
+  friend: friendSchema,
+  from: z.string(),
+  to: z.string(),
+  timezone: z.string(),
+  first_recorded_at: z.string().nullable(),
+  latest_observed_online: z.string().nullable(),
+  online_minutes: z.number().nonnegative(),
+  online_overlap_minutes: z.number().nonnegative(),
+  co_presence_minutes: z.number().nonnegative(),
+  most_visited_worlds: z.array(z.object({
+    world_id: z.string(),
+    name: z.string(),
+    minutes: z.number().nonnegative(),
+    visits: z.number().int().nonnegative(),
+    last_observed: z.string(),
+  })),
+  hourly_activity: z.array(activityCellSchema.extend({
+    hour: z.number().int().min(0).max(23),
+  })).length(24),
+  identity_events: z.array(identityEventSchema),
+  coverage: coverageSchema,
+  gaps: z.array(coverageGapSchema),
+});
+
+const searchTagSchema = tagSchema.pick({ id: true, name: true, color: true });
+
+const searchSchema = z.object({
+  query: z.string(),
+  groups: z.object({
+    people: z.array(z.object({
+      id: z.string(),
+      username: z.string(),
+      name: z.string(),
+      status: z.string(),
+      location: z.string(),
+      avatar_url: z.string(),
+      is_self: z.boolean(),
+      pinned: z.boolean(),
+      tags: z.array(searchTagSchema),
+      matches: z.array(z.enum(['id', 'current_name', 'historical_name', 'note', 'tag'])),
+      href: z.string().startsWith('#'),
+    })),
+    worlds: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      author_name: z.string(),
+      thumbnail_url: z.string(),
+      last_observed: z.string(),
+      resolved: z.boolean(),
+      href: z.string().startsWith('#'),
+    })),
+    history: z.array(z.object({
+      id: z.string(),
+      friend_id: z.string(),
+      name: z.string(),
+      username: z.string(),
+      occurred_at: z.string(),
+      old_status: z.string(),
+      new_status: z.string(),
+      location: z.string(),
+      platform: z.string(),
+      href: z.string().startsWith('#'),
+    })),
+    destinations: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      description: z.string(),
+      href: z.string().startsWith('#'),
+    })),
+  }),
+});
+
+const preferenceSchema = z.object({
+  timezone: z.string(),
+  updated_at: z.string(),
+});
+
+const worldLibraryItemSchema = worldInfoSchema.extend({
+  last_observed: z.string(),
+  event_count: z.number().int().nonnegative(),
+  stale: z.boolean().default(false),
+});
+
+const worldLibrarySchema = z.object({
+  items: z.array(worldLibraryItemSchema),
+  next_cursor: z.string().nullable(),
+  total: z.number().int().nonnegative(),
+});
+
+const discoveryWorldStatsSchema = z.object({
+  minutes: z.number().nonnegative(),
+  unique_people: z.number().int().nonnegative(),
+  visit_count: z.number().int().nonnegative(),
+  return_visits: z.number().int().nonnegative(),
+  last_observed: z.string().nullable(),
+});
+
+const discoveryWorldSchema = worldInfoSchema.extend({
+  world_id: z.string(),
+  rank: z.number().int().positive(),
+  minutes: z.number().nonnegative(),
+  unique_people: z.number().int().nonnegative(),
+  visit_count: z.number().int().nonnegative(),
+  return_visits: z.number().int().nonnegative(),
+  last_observed: z.string().nullable(),
+  stale: z.boolean().default(false),
+});
+
+const risingWorldSchema = worldInfoSchema.extend({
+  world_id: z.string(),
+  rank: z.number().int().positive(),
+  current: discoveryWorldStatsSchema,
+  previous: discoveryWorldStatsSchema,
+  delta: z.object({
+    minutes: z.number(),
+    unique_people: z.number().int(),
+    visit_count: z.number().int(),
+  }),
+  stale: z.boolean().default(false),
+});
+
+const discoveryCoverageSchema = z.object({
+  range_minutes: z.number().nonnegative(),
+  covered_minutes: z.number().nonnegative(),
+  ratio: z.number().min(0).max(1),
+  first_recorded: z.string().nullable(),
+  last_recorded: z.string().nullable(),
+  gaps: z.array(z.object({
+    from: z.string(),
+    to: z.string(),
+    minutes: z.number().nonnegative(),
+  })),
+});
+
+const discoverySchema = z.object({
+  hot: z.array(discoveryWorldSchema),
+  rising: z.array(risingWorldSchema),
+  unavailable_minutes: z.number().nonnegative(),
+  previous_unavailable_minutes: z.number().nonnegative(),
+  range: z.object({
+    days: z.union([z.literal(7), z.literal(30)]),
+    from: z.string(),
+    to: z.string(),
+    previous_from: z.string(),
+    previous_to: z.string(),
+  }),
+  coverage: discoveryCoverageSchema,
+  selected_people: z.number().int().nonnegative(),
+  ranking: z.object({
+    hot: z.array(z.string()),
+    rising: z.array(z.string()),
+  }),
+});
 
 export type Identity = z.infer<typeof identitySchema>;
 export type Me = z.infer<typeof meSchema>;
@@ -280,16 +463,33 @@ export type WorldAnalytics = z.infer<typeof worldAnalyticsSchema>;
 export type WorldSpan = z.infer<typeof worldSpanSchema>;
 export type WorldInfo = z.infer<typeof worldInfoSchema>;
 export type Coverage = z.infer<typeof standaloneCoverageSchema>;
+export type Tag = z.infer<typeof tagSchema>;
+export type Annotation = z.infer<typeof annotationSchema>;
+export type FriendInsight = z.infer<typeof friendInsightSchema>;
+export type SearchResults = z.infer<typeof searchSchema>;
+export type Preference = z.infer<typeof preferenceSchema>;
+export type WorldLibraryItem = z.infer<typeof worldLibraryItemSchema>;
+export type WorldLibrary = z.infer<typeof worldLibrarySchema>;
+export type DiscoveryWorld = z.infer<typeof discoveryWorldSchema>;
+export type RisingWorld = z.infer<typeof risingWorldSchema>;
+export type Discovery = z.infer<typeof discoverySchema>;
 
 export class ApiError extends Error {
   readonly status: number;
   readonly code: 'http' | 'network' | 'invalid-data';
+  readonly details: unknown;
 
-  constructor(message: string, status = 0, code: ApiError['code'] = 'http') {
+  constructor(
+    message: string,
+    status = 0,
+    code: ApiError['code'] = 'http',
+    details: unknown = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -360,7 +560,7 @@ async function rawRequest(path: string, options: RequestInit = {}): Promise<unkn
       typeof payload === 'object' && payload && 'error' in payload && typeof payload.error === 'string'
         ? payload.error
         : `请求失败（${response.status}）`;
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, 'http', payload);
   }
   return payload;
 }
@@ -536,6 +736,117 @@ export const getEvents = (options: { query?: string; limit?: number; offset?: nu
   parameters.set('limit', String(options.limit ?? 50));
   parameters.set('offset', String(options.offset ?? 0));
   return request(`/v1/events?${parameters}`, eventPageSchema);
+};
+
+export const getSearch = (query: string, signal?: AbortSignal) => {
+  const parameters = new URLSearchParams({ q: query, limit: '8' });
+  return request(
+    `/v1/search?${parameters}`,
+    searchSchema,
+    signal ? { signal } : {},
+  );
+};
+
+export const getFriendInsight = (
+  friendId: string,
+  rangeFrom: string,
+  rangeTo: string,
+) => {
+  const parameters = new URLSearchParams({ from: rangeFrom, to: rangeTo });
+  return request(
+    `/v1/friends/${encodeURIComponent(friendId)}/insights?${parameters}`,
+    friendInsightSchema,
+  );
+};
+
+export const getFriendAnnotation = (friendId: string) =>
+  request(
+    `/v1/friends/${encodeURIComponent(friendId)}/annotation`,
+    annotationSchema,
+  );
+
+export const updateFriendAnnotation = (
+  friendId: string,
+  value: Pick<Annotation, 'note' | 'pinned' | 'revision'>,
+) => request(
+  `/v1/friends/${encodeURIComponent(friendId)}/annotation`,
+  annotationSchema,
+  { method: 'PUT', body: JSON.stringify(value) },
+);
+
+export const getTags = () => request('/v1/tags', z.array(tagSchema));
+
+export const createTag = (value: Pick<Tag, 'name' | 'color'>) =>
+  request('/v1/tags', tagSchema, {
+    method: 'POST',
+    body: JSON.stringify(value),
+  });
+
+export const updateTag = (tagId: string, value: Pick<Tag, 'name' | 'color'>) =>
+  request(`/v1/tags/${encodeURIComponent(tagId)}`, tagSchema, {
+    method: 'PUT',
+    body: JSON.stringify(value),
+  });
+
+export const deleteTag = (tagId: string) =>
+  request(
+    `/v1/tags/${encodeURIComponent(tagId)}`,
+    z.object({ ok: z.literal(true) }),
+    { method: 'DELETE', body: JSON.stringify({}) },
+  );
+
+export const assignFriendTag = (friendId: string, tagId: string) =>
+  request(
+    `/v1/friends/${encodeURIComponent(friendId)}/tags/${encodeURIComponent(tagId)}`,
+    z.object({ ok: z.literal(true), friend_id: z.string(), tag_id: z.string() }),
+    { method: 'PUT', body: JSON.stringify({}) },
+  );
+
+export const unassignFriendTag = (friendId: string, tagId: string) =>
+  request(
+    `/v1/friends/${encodeURIComponent(friendId)}/tags/${encodeURIComponent(tagId)}`,
+    z.object({ ok: z.literal(true), friend_id: z.string(), tag_id: z.string() }),
+    { method: 'DELETE', body: JSON.stringify({}) },
+  );
+
+export const getPreferences = () => request('/v1/preferences', preferenceSchema);
+
+export const updatePreferences = (timezone: string) =>
+  request('/v1/preferences', preferenceSchema, {
+    method: 'PUT',
+    body: JSON.stringify({ timezone }),
+  });
+
+export const getWorldLibrary = (options: {
+  query?: string;
+  author?: string;
+  friendId?: string;
+  tagId?: string;
+  cursor?: string;
+  limit?: number;
+} = {}) => {
+  const parameters = new URLSearchParams({ limit: String(options.limit ?? 36) });
+  if (options.query) parameters.set('q', options.query);
+  if (options.author) parameters.set('author', options.author);
+  if (options.friendId) parameters.set('friend_id', options.friendId);
+  if (options.tagId) parameters.set('tag_id', options.tagId);
+  if (options.cursor) parameters.set('cursor', options.cursor);
+  return request(`/v1/world-library?${parameters}`, worldLibrarySchema);
+};
+
+export const getDiscovery = (options: {
+  days?: 7 | 30;
+  friendId?: string;
+  tagId?: string;
+  includeSelf?: boolean;
+} = {}) => {
+  const parameters = new URLSearchParams({
+    days: String(options.days ?? 7),
+    include_self: String(options.includeSelf ?? true),
+  });
+  if (options.friendId) parameters.set('friend_id', options.friendId);
+  if (options.tagId) parameters.set('tag_id', options.tagId);
+  return request(`/v1/discovery/worlds?${parameters}`, discoverySchema);
 };
 
 export const importBackupFile = (file: File) =>
