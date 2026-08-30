@@ -29,12 +29,16 @@ import type {
   WorldTag,
   WorldLibraryItem,
 } from '../api';
+import { Pagination } from '../components/Pagination';
 import { friendName } from '../format';
 import { useHashParameters } from '../navigation';
 
 type DiscoveryTab = 'hot' | 'rising' | 'library';
+type DiscoveryDays = 0 | 1 | 7 | 30;
 type RankedWorld = DiscoveryWorld | RisingWorld;
 type WorldCardSource = RankedWorld | WorldLibraryItem;
+
+const RANKING_PAGE_SIZE = 30;
 
 const tabs: Array<{
   id: DiscoveryTab;
@@ -49,7 +53,22 @@ const tabs: Array<{
 const isDiscoveryTab = (value: string | null): value is DiscoveryTab =>
   value === 'hot' || value === 'rising' || value === 'library';
 
-const selectedDays = (value: string | null): 7 | 30 => (value === '30' ? 30 : 7);
+const discoveryScopes: Array<{ days: DiscoveryDays; label: string; summary: string }> = [
+  { days: 1, label: '1 天', summary: '近 1 天' },
+  { days: 7, label: '7 天', summary: '近 7 天' },
+  { days: 30, label: '30 天', summary: '近 30 天' },
+  { days: 0, label: '全部', summary: '全部记录' },
+];
+
+const selectedDays = (value: string | null): DiscoveryDays => {
+  const parsed = Number(value);
+  return parsed === 0 || parsed === 1 || parsed === 7 || parsed === 30 ? parsed : 7;
+};
+
+const selectedPage = (value: string | null) => {
+  const parsed = Number.parseInt(value ?? '1', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed - 1 : 0;
+};
 
 const worldIdOf = (world: WorldCardSource) => {
   const rankedId = (world as RankedWorld).world_id;
@@ -301,6 +320,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
   const requestedTab = parameters.get('discoverTab');
   const tab: DiscoveryTab = isDiscoveryTab(requestedTab) ? requestedTab : 'hot';
   const days = selectedDays(parameters.get('discoverDays'));
+  const rankingPage = selectedPage(parameters.get('discoverPage'));
   const friendId = parameters.get('discoverFriend') ?? '';
   const worldTag = parameters.get('discoverTag') ?? '';
   const includeSelf = parameters.get('discoverSelf') !== '0';
@@ -334,10 +354,12 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
     staleTime: 5 * 60_000,
   });
   const discovery = useQuery({
-    queryKey: ['discovery', days, friendId, worldTag, includeSelf],
+    queryKey: ['discovery', days, friendId, worldTag, includeSelf, rankingPage],
     queryFn: () => getDiscovery({
       days,
       includeSelf,
+      limit: RANKING_PAGE_SIZE,
+      offset: rankingPage * RANKING_PAGE_SIZE,
       ...(friendId ? { friendId } : {}),
       ...(worldTag ? { worldTag } : {}),
     }),
@@ -378,7 +400,16 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
 
   const changeSharedFilter = (values: Record<string, string | null>) => {
     setCursorStack([]);
-    update({ ...values, libraryCursor: null });
+    update({ ...values, discoverPage: null, libraryCursor: null });
+  };
+
+  const changeTab = (nextTab: DiscoveryTab) => {
+    setCursorStack([]);
+    update({ discoverTab: nextTab, discoverPage: null, libraryCursor: null });
+  };
+
+  const changeScope = (nextDays: DiscoveryDays) => {
+    update({ discoverDays: String(nextDays), discoverPage: null });
   };
 
   const submitLibrarySearch = (event: FormEvent) => {
@@ -399,6 +430,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
       discoverFriend: null,
       discoverTag: null,
       discoverSelf: null,
+      discoverPage: null,
       libraryQ: null,
       libraryAuthor: null,
       libraryCursor: null,
@@ -420,10 +452,27 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
   };
 
   const activeRankedWorlds = tab === 'rising' ? discovery.data?.rising : discovery.data?.hot;
+  const activeRankingTotal = discovery.data
+    ? tab === 'rising' ? discovery.data.rising_total : discovery.data.hot_total
+    : null;
+  const rankingPageCount = activeRankingTotal === null
+    ? null
+    : Math.max(1, Math.ceil(activeRankingTotal / RANKING_PAGE_SIZE));
+  const displayedRankingPageCount = rankingPageCount ?? Math.max(1, rankingPage + 1);
+  const scopeSummary = discoveryScopes.find((scope) => scope.days === days)?.summary ?? '近 7 天';
   const rankingFiltered = Boolean(friendId || worldTag || !includeSelf);
   const libraryFiltered = Boolean(friendId || worldTag || libraryQuery || libraryAuthor);
   const filtersUnavailable = (friends.isError && !friends.data)
     || (worldTags.isError && !worldTags.data);
+
+  useEffect(() => {
+    if (tab === 'library' || rankingPageCount === null || rankingPage < rankingPageCount) return;
+    update({ discoverPage: rankingPageCount > 1 ? rankingPageCount : null }, true);
+  }, [rankingPage, rankingPageCount, tab, update]);
+
+  const setRankingPage = (nextPage: number) => {
+    update({ discoverPage: nextPage > 0 ? nextPage + 1 : null });
+  };
 
   return (
     <>
@@ -449,7 +498,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
                 aria-selected={tab === item.id}
                 tabIndex={tab === item.id ? 0 : -1}
                 className={tab === item.id ? 'is-active' : ''}
-                onClick={() => update({ discoverTab: item.id })}
+                onClick={() => changeTab(item.id)}
                 onKeyDown={(event) => {
                   const currentIndex = tabs.findIndex((candidate) => candidate.id === item.id);
                   let nextIndex = currentIndex;
@@ -461,7 +510,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
                   event.preventDefault();
                   const nextTab = tabs[nextIndex];
                   if (!nextTab) return;
-                  update({ discoverTab: nextTab.id });
+                  changeTab(nextTab.id);
                   window.requestAnimationFrame(() => {
                     document.getElementById(`discovery-tab-${nextTab.id}`)?.focus();
                   });
@@ -478,22 +527,18 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
           {tab !== 'library' && (
             <div className="discovery-period" role="group" aria-label="统计时间范围">
               <span>时间范围</span>
-              <button
-                type="button"
-                className={days === 7 ? 'is-active' : ''}
-                aria-pressed={days === 7}
-                onClick={() => update({ discoverDays: '7' })}
-              >
-                近 7 天
-              </button>
-              <button
-                type="button"
-                className={days === 30 ? 'is-active' : ''}
-                aria-pressed={days === 30}
-                onClick={() => update({ discoverDays: '30' })}
-              >
-                近 30 天
-              </button>
+              {discoveryScopes.map((scope) => (
+                <button
+                  key={scope.days}
+                  type="button"
+                  className={days === scope.days ? 'is-active' : ''}
+                  aria-label={scope.summary}
+                  aria-pressed={days === scope.days}
+                  onClick={() => changeScope(scope.days)}
+                >
+                  {scope.label}
+                </button>
+              ))}
             </div>
           )}
 
@@ -609,7 +654,7 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
                     ? `${library.data.total.toLocaleString('zh-CN')} 个世界`
                     : '整理中…'
                   : discovery.data
-                    ? `${discovery.data.selected_people.toLocaleString('zh-CN')} 位玩家 · 近 ${days} 天`
+                    ? `${discovery.data.selected_people.toLocaleString('zh-CN')} 位玩家 · ${scopeSummary}`
                     : '整理中…'}
               </span>
             </div>
@@ -692,6 +737,16 @@ export function DiscoveryView({ onOpenWorld }: { onOpenWorld: (worldId: string) 
                 </div>
               ) : (
                 <EmptyWorlds filtered={rankingFiltered} library={false} />
+              )}
+
+              {discovery.data && (activeRankingTotal ?? 0) > RANKING_PAGE_SIZE && (
+                <Pagination
+                  page={Math.min(rankingPage, displayedRankingPageCount - 1)}
+                  pageCount={displayedRankingPageCount}
+                  busy={discovery.isFetching}
+                  label={tab === 'rising' ? '上升世界' : '热门世界'}
+                  onPageChange={setRankingPage}
+                />
               )}
             </>
           )}

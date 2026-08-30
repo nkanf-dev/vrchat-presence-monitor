@@ -301,16 +301,27 @@ describe('hosted API client', () => {
         range_minutes: 10080, covered_minutes: 9000, ratio: 0.8929,
         first_recorded: '2026-08-23T00:00:00Z', last_recorded: '2026-08-30T00:00:00Z', gaps: [],
       },
+      hot_total: 72,
+      rising_total: 18,
+      limit: 30,
+      offset: 30,
       selected_people: 12,
       ranking: { hot: ['unique_people:desc'], rising: ['delta.minutes:desc'] },
     }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getDiscovery({ days: 7, includeSelf: false, tagId: 'tag_a' });
+    const result = await getDiscovery({
+      days: 0,
+      includeSelf: false,
+      worldTag: 'author_tag_social',
+      limit: 30,
+      offset: 30,
+    });
 
     expect(result.hot[0]?.minutes).toBe(90);
+    expect(result.hot_total).toBe(72);
     expect(fetchMock).toHaveBeenCalledWith(
-      '/v1/discovery/worlds?days=7&include_self=false&tag_id=tag_a',
+      '/v1/discovery/worlds?days=0&include_self=false&limit=30&offset=30&world_tag=author_tag_social',
       expect.objectContaining({ credentials: 'same-origin' }),
     );
   });

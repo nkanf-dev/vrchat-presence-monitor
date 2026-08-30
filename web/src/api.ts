@@ -449,10 +449,14 @@ const discoveryCoverageSchema = z.object({
 const discoverySchema = z.object({
   hot: z.array(discoveryWorldSchema),
   rising: z.array(risingWorldSchema),
+  hot_total: z.number().int().nonnegative(),
+  rising_total: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
   unavailable_minutes: z.number().nonnegative(),
   previous_unavailable_minutes: z.number().nonnegative(),
   range: z.object({
-    days: z.union([z.literal(7), z.literal(30)]),
+    days: z.union([z.literal(0), z.literal(1), z.literal(7), z.literal(30)]),
     from: z.string(),
     to: z.string(),
     previous_from: z.string(),
@@ -862,16 +866,20 @@ export const getWorldLibrary = (options: {
 };
 
 export const getDiscovery = (options: {
-  days?: 7 | 30;
+  days?: 0 | 1 | 7 | 30;
   friendId?: string;
   worldTag?: string;
   /** @deprecated Use worldTag. */
   tagId?: string;
   includeSelf?: boolean;
+  limit?: number;
+  offset?: number;
 } = {}) => {
   const parameters = new URLSearchParams({
     days: String(options.days ?? 7),
     include_self: String(options.includeSelf ?? true),
+    limit: String(options.limit ?? 30),
+    offset: String(options.offset ?? 0),
   });
   if (options.friendId) parameters.set('friend_id', options.friendId);
   const worldTag = options.worldTag ?? options.tagId;

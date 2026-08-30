@@ -417,7 +417,12 @@ class WorldHttpContractTests(unittest.TestCase):
         )
         discovery = self.client.get(
             "/v1/discovery/worlds",
-            params={"days": 7, "world_tag": "author_tag_social"},
+            params={
+                "days": 7,
+                "world_tag": "author_tag_social",
+                "limit": 1,
+                "offset": 0,
+            },
         )
 
         self.assertEqual(
@@ -431,6 +436,10 @@ class WorldHttpContractTests(unittest.TestCase):
         self.assertEqual(library.json()["items"][0]["id"], WORLD_ID)
         self.assertEqual(discovery.status_code, 200, discovery.text)
         self.assertEqual(discovery.json()["hot"][0]["world_id"], WORLD_ID)
+        self.assertEqual(discovery.json()["hot_total"], 1)
+        self.assertEqual(discovery.json()["rising_total"], 1)
+        self.assertEqual(discovery.json()["limit"], 1)
+        self.assertEqual(discovery.json()["offset"], 0)
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -501,6 +510,127 @@ class DiscoveryTests(unittest.TestCase):
             [item["world_id"] for item in migrated["hot"]], [WORLD_ID]
         )
         self.assertEqual(migrated["hot"][0]["minutes"], 3.0)
+
+    def test_pagination_ranks_all_worlds_but_hydrates_only_the_requested_page(self):
+        tenant_id = self.create_tenant("paged-discovery")
+        event_time = self.current - timedelta(days=1)
+        for friend_id, world_id, minutes in (
+            ("usr_a", WORLD_ID, 2),
+            ("usr_b", WORLD_B, 4),
+            ("usr_c", WORLD_C, 6),
+        ):
+            seed_friend(
+                self.store,
+                tenant_id,
+                friend_id,
+                friend_id,
+                updated_at=event_time,
+            )
+            seed_tracking(
+                self.store,
+                tenant_id,
+                friend_id,
+                event_time - timedelta(minutes=1),
+            )
+            seed_event(
+                self.store,
+                tenant_id,
+                friend_id,
+                f"{friend_id}-enter",
+                event_time,
+                "active",
+                f"{world_id}:instance",
+            )
+            seed_event(
+                self.store,
+                tenant_id,
+                friend_id,
+                f"{friend_id}-leave",
+                event_time + timedelta(minutes=minutes),
+                "offline",
+                "offline",
+            )
+        seed_coverage_pair(self.store, tenant_id, event_time)
+        discovery, _, _ = self.service()
+
+        with mock.patch.object(
+            self.store, "world_cache_get", wraps=self.store.world_cache_get
+        ) as cache_get, mock.patch.object(
+            discovery,
+            "_world_presentation",
+            side_effect=lambda _tenant_id, world_id: {
+                "id": world_id,
+                "name": world_id,
+                "resolution_status": "ready",
+                "stale": False,
+            },
+        ) as present:
+            result = discovery.discover(tenant_id, 7, limit=1, offset=1)
+
+        self.assertEqual(result["hot_total"], 3)
+        self.assertEqual(result["rising_total"], 3)
+        self.assertEqual(result["limit"], 1)
+        self.assertEqual(result["offset"], 1)
+        self.assertEqual([item["world_id"] for item in result["hot"]], [WORLD_B])
+        self.assertEqual(
+            [item["world_id"] for item in result["rising"]], [WORLD_B]
+        )
+        self.assertEqual(result["hot"][0]["rank"], 2)
+        self.assertEqual(result["rising"][0]["rank"], 2)
+        present.assert_called_once_with(tenant_id, WORLD_B)
+        self.assertEqual(cache_get.call_count, 0)
+
+    def test_one_day_and_all_scopes_use_the_earliest_relevant_observation(self):
+        tenant_id = self.create_tenant("discovery-scopes")
+        old_time = self.current - timedelta(days=40)
+        recent_time = self.current - timedelta(hours=12)
+        tracking_start = old_time - timedelta(minutes=1)
+        seed_friend(
+            self.store,
+            tenant_id,
+            "usr_scopes",
+            "Scopes",
+            updated_at=old_time,
+        )
+        seed_tracking(
+            self.store, tenant_id, "usr_scopes", tracking_start
+        )
+        seed_coverage_pair(self.store, tenant_id, old_time)
+        seed_coverage_pair(self.store, tenant_id, recent_time)
+        for event_id, occurred_at, status, location in (
+            ("old-enter", old_time, "active", f"{WORLD_ID}:old"),
+            ("old-leave", old_time + timedelta(minutes=3), "offline", "offline"),
+            ("recent-enter", recent_time, "active", f"{WORLD_B}:recent"),
+            (
+                "recent-leave",
+                recent_time + timedelta(minutes=4),
+                "offline",
+                "offline",
+            ),
+        ):
+            seed_event(
+                self.store,
+                tenant_id,
+                "usr_scopes",
+                event_id,
+                occurred_at,
+                status,
+                location,
+            )
+        discovery, _, _ = self.service()
+
+        one_day = discovery.discover(tenant_id, 1)
+        all_time = discovery.discover(tenant_id, 0)
+
+        self.assertEqual(
+            [item["world_id"] for item in one_day["hot"]], [WORLD_B]
+        )
+        self.assertEqual(
+            [item["world_id"] for item in all_time["hot"]],
+            [WORLD_B, WORLD_ID],
+        )
+        self.assertEqual(all_time["range"]["days"], 0)
+        self.assertEqual(all_time["range"]["from"], as_text(tracking_start))
 
     def test_private_hidden_and_gap_time_do_not_become_world_time(self):
         tenant_id = self.create_tenant("coverage")
@@ -860,6 +990,9 @@ class DiscoveryTests(unittest.TestCase):
     def test_discovery_accepts_only_product_ranges(self):
         tenant_id = self.create_tenant("ranges")
         discovery, _, _ = self.service()
+        for days in (0, 1, 7, 30):
+            with self.subTest(days=days):
+                self.assertEqual(discovery.discover(tenant_id, days)["range"]["days"], days)
         with self.assertRaises(ValueError):
             discovery.discover(tenant_id, 14)
 

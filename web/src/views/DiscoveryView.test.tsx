@@ -46,6 +46,10 @@ const discoveryResult = {
     previous: { ...stats, minutes: 25 },
     delta: { minutes: 70, unique_people: 1, visit_count: 2 },
   }],
+  hot_total: 1,
+  rising_total: 1,
+  limit: 30,
+  offset: 0,
   unavailable_minutes: 0,
   previous_unavailable_minutes: 0,
   range: {
@@ -134,6 +138,8 @@ describe('DiscoveryView', () => {
       friendId: 'usr_alice',
       worldTag: 'author_tag_social',
       includeSelf: false,
+      limit: 30,
+      offset: 0,
     });
 
     await userEvent.click(screen.getByRole('button', { name: '查看 Coffee House 的世界详情' }));
@@ -150,7 +156,13 @@ describe('DiscoveryView', () => {
   });
 
   it('keeps tab and filter state in the hash when opening the world library', async () => {
-    window.location.hash = '#area=analysis&section=discover&day=2026-08-20&discoverDays=30&discoverTag=author_tag_social';
+    window.location.hash = '#area=analysis&section=discover&day=2026-08-20&discoverDays=30&discoverTag=author_tag_social&discoverPage=2';
+    api.getDiscovery.mockResolvedValue({
+      ...discoveryResult,
+      hot_total: 60,
+      rising_total: 60,
+      offset: 30,
+    });
     renderView();
 
     await screen.findByText('Coffee House');
@@ -162,6 +174,7 @@ describe('DiscoveryView', () => {
       expect(parameters.get('discoverTab')).toBe('library');
       expect(parameters.get('discoverDays')).toBe('30');
       expect(parameters.get('discoverTag')).toBe('author_tag_social');
+      expect(parameters.get('discoverPage')).toBeNull();
       expect(parameters.get('day')).toBe('2026-08-20');
     });
     expect(api.getWorldLibrary).toHaveBeenCalledWith(expect.objectContaining({
@@ -171,6 +184,13 @@ describe('DiscoveryView', () => {
   });
 
   it('shows world-tag counts and keeps the selected tag in the hash', async () => {
+    window.location.hash = '#area=analysis&section=discover&discoverPage=2';
+    api.getDiscovery.mockResolvedValue({
+      ...discoveryResult,
+      hot_total: 60,
+      rising_total: 60,
+      offset: 30,
+    });
     renderView();
 
     const tagSelect = await screen.findByRole('combobox', { name: '标签' });
@@ -180,9 +200,62 @@ describe('DiscoveryView', () => {
     await waitFor(() => {
       expect(new URLSearchParams(window.location.hash.slice(1)).get('discoverTag'))
         .toBe('author_tag_social');
+      expect(new URLSearchParams(window.location.hash.slice(1)).get('discoverPage')).toBeNull();
     });
     expect(api.getDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
       worldTag: 'author_tag_social',
+      offset: 0,
+    }));
+  });
+
+  it('supports all-time scope and server-backed ranking pages in the hash', async () => {
+    window.location.hash = '#area=analysis&section=discover&discoverDays=0&discoverPage=2';
+    api.getDiscovery.mockResolvedValue({
+      ...discoveryResult,
+      hot_total: 61,
+      rising_total: 35,
+      limit: 30,
+      offset: 30,
+      range: { ...discoveryResult.range, days: 0 },
+    });
+    renderView();
+
+    expect(await screen.findByText('Coffee House')).toBeVisible();
+    expect(api.getDiscovery).toHaveBeenCalledWith(expect.objectContaining({
+      days: 0,
+      limit: 30,
+      offset: 30,
+    }));
+    expect(screen.getByRole('status', { name: '' })).toHaveTextContent('第 2 / 3 页');
+
+    await userEvent.click(screen.getByRole('button', { name: '热门世界下一页' }));
+    await waitFor(() => {
+      expect(new URLSearchParams(window.location.hash.slice(1)).get('discoverPage')).toBe('3');
+    });
+    expect(api.getDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 60 }));
+  });
+
+  it('resets ranking pagination when the scope changes', async () => {
+    window.location.hash = '#area=analysis&section=discover&discoverDays=30&discoverPage=2';
+    api.getDiscovery.mockResolvedValue({
+      ...discoveryResult,
+      hot_total: 60,
+      rising_total: 60,
+      offset: 30,
+    });
+    renderView();
+
+    await screen.findByText('Coffee House');
+    await userEvent.click(screen.getByRole('button', { name: '全部记录' }));
+
+    await waitFor(() => {
+      const parameters = new URLSearchParams(window.location.hash.slice(1));
+      expect(parameters.get('discoverDays')).toBe('0');
+      expect(parameters.get('discoverPage')).toBeNull();
+    });
+    expect(api.getDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
+      days: 0,
+      offset: 0,
     }));
   });
 

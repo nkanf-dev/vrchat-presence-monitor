@@ -533,7 +533,7 @@ class WorldService:
 
 
 class DiscoveryService:
-    ALLOWED_DAYS = frozenset({7, 30})
+    ALLOWED_DAYS = frozenset({0, 1, 7, 30})
     _CACHE_SECONDS = 60.0
     _CACHE_LIMIT = 128
 
@@ -754,6 +754,65 @@ class DiscoveryService:
             "revision": scope["revision"],
         }
 
+    def _earliest_observation(
+        self,
+        tenant_id: str,
+        scope: dict[str, Any],
+        end: datetime,
+    ) -> datetime:
+        end_key = self._iso(end)
+        candidates: list[str] = []
+        sample_value = ""
+        friend_ids = list(scope["selection"])
+        with self.store.lock, self.store.connection() as db:
+            self.store._require_tenant(db, tenant_id)
+            sample = db.execute(
+                """SELECT MIN(observed_at) AS value FROM collection_samples
+                WHERE tenant_id=? AND authoritative=1 AND outcome='success'
+                  AND observed_at<?""",
+                (tenant_id, end_key),
+            ).fetchone()
+            if sample and sample["value"]:
+                sample_value = str(sample["value"])
+            if friend_ids:
+                placeholders = ",".join("?" for _ in friend_ids)
+                event = db.execute(
+                    f"""SELECT MIN(e.occurred_at) AS value FROM status_events e
+                    WHERE e.tenant_id=? AND e.friend_id IN ({placeholders})
+                      AND e.occurred_at<?
+                      AND NOT EXISTS(SELECT 1 FROM event_anomalies a
+                          WHERE a.tenant_id=e.tenant_id
+                            AND a.event_kind='status_event'
+                            AND a.event_id=e.client_event_id)""",
+                    (tenant_id, *friend_ids, end_key),
+                ).fetchone()
+                tracking = db.execute(
+                    f"""SELECT MIN(occurred_at) AS value
+                    FROM friend_tracking_events
+                    WHERE tenant_id=? AND friend_id IN ({placeholders})
+                      AND occurred_at<?""",
+                    (tenant_id, *friend_ids, end_key),
+                ).fetchone()
+                for row in (event, tracking):
+                    if row and row["value"]:
+                        candidates.append(str(row["value"]))
+
+        if not candidates and sample_value:
+            candidates.append(sample_value)
+
+        parsed: list[datetime] = []
+        for value in candidates:
+            try:
+                item = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if item.tzinfo is None:
+                item = item.replace(tzinfo=timezone.utc)
+            normalized = item.astimezone(timezone.utc)
+            if normalized < end:
+                parsed.append(normalized)
+        return min(parsed) if parsed else end - timedelta(days=1)
+
     @staticmethod
     def _empty_world_stats() -> dict[str, Any]:
         return {
@@ -954,7 +1013,6 @@ class DiscoveryService:
 
     def _build_response(
         self,
-        tenant_id: str,
         days: int,
         start: datetime,
         end: datetime,
@@ -975,16 +1033,17 @@ class DiscoveryService:
             snapshot, previous_coverage, previous_start, start
         )
 
+        selected_tag = str(world_tag or "").strip()
         selected_worlds = {
             world_id
             for world_id in current
-            if world_has_metadata_tag(
-                self.store.world_cache_get(world_id), world_tag
+            if not selected_tag
+            or world_has_metadata_tag(
+                self.store.world_cache_get(world_id), selected_tag
             )
         }
         hot = [
             {
-                **self._world_presentation(tenant_id, world_id),
                 "world_id": world_id,
                 **current[world_id],
             }
@@ -1013,7 +1072,6 @@ class DiscoveryService:
                 continue
             rising.append(
                 {
-                    **self._world_presentation(tenant_id, world_id),
                     "world_id": world_id,
                     "current": current_stats,
                     "previous": previous_stats,
@@ -1057,6 +1115,45 @@ class DiscoveryService:
             },
         }
 
+    def _present_page(
+        self,
+        tenant_id: str,
+        payload: dict[str, Any],
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        hot_ranked = payload["hot"]
+        rising_ranked = payload["rising"]
+        hot_page = hot_ranked[offset : offset + limit]
+        rising_page = rising_ranked[offset : offset + limit]
+        presentations: dict[str, dict[str, Any]] = {}
+
+        def present(item: dict[str, Any]) -> dict[str, Any]:
+            world_id = str(item["world_id"])
+            if world_id not in presentations:
+                presentations[world_id] = self._world_presentation(
+                    tenant_id, world_id
+                )
+            return {**presentations[world_id], **copy.deepcopy(item)}
+
+        response = {
+            key: copy.deepcopy(value)
+            for key, value in payload.items()
+            if key not in {"hot", "rising"}
+        }
+        response.update(
+            {
+                "hot": [present(item) for item in hot_page],
+                "rising": [present(item) for item in rising_page],
+                "hot_total": len(hot_ranked),
+                "rising_total": len(rising_ranked),
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        return response
+
     def discover(
         self,
         tenant_id: str,
@@ -1064,18 +1161,26 @@ class DiscoveryService:
         friend_id: str = "",
         world_tag: str = "",
         include_self: bool = True,
+        limit: int = 30,
+        offset: int = 0,
     ) -> dict[str, Any]:
         selected_days = int(days)
         if selected_days not in self.ALLOWED_DAYS:
-            raise ValueError("范围仅支持 7 天或 30 天")
+            raise ValueError("范围仅支持 1 天、7 天、30 天或全部")
+        page_size = max(1, min(int(limit), 100))
+        page_offset = max(0, int(offset))
         end = self._current_time()
-        start = end - timedelta(days=selected_days)
-        previous_start = start - timedelta(days=selected_days)
         scope = self._scope(
             tenant_id,
             friend_id=str(friend_id or ""),
             include_self=bool(include_self),
         )
+        start = (
+            self._earliest_observation(tenant_id, scope, end)
+            if selected_days == 0
+            else end - timedelta(days=selected_days)
+        )
+        previous_start = start - (end - start)
         cache_key = (
             tenant_id,
             selected_days,
@@ -1087,10 +1192,18 @@ class DiscoveryService:
             *scope["revision"],
         )
         current_monotonic = time.monotonic()
+        cached_payload: dict[str, Any] | None = None
         with self._cache_lock:
             cached = self._cache.get(cache_key)
             if cached and cached[0] > current_monotonic:
-                return copy.deepcopy(cached[1])
+                cached_payload = cached[1]
+        if cached_payload is not None:
+            return self._present_page(
+                tenant_id,
+                cached_payload,
+                limit=page_size,
+                offset=page_offset,
+            )
 
         snapshot = self._snapshot(
             tenant_id,
@@ -1099,7 +1212,6 @@ class DiscoveryService:
             scope,
         )
         payload = self._build_response(
-            tenant_id,
             selected_days,
             start,
             end,
@@ -1115,4 +1227,9 @@ class DiscoveryService:
                 current_monotonic + self._CACHE_SECONDS,
                 copy.deepcopy(payload),
             )
-        return payload
+        return self._present_page(
+            tenant_id,
+            payload,
+            limit=page_size,
+            offset=page_offset,
+        )

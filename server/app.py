@@ -619,6 +619,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         friend_id: str = Query(default="", max_length=128),
         world_tag: str = Query(default="", max_length=160),
         include_self: bool = Query(default=True),
+        limit: int = Query(default=30, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
         auth: Authenticated = Depends(viewer),
     ) -> dict[str, Any]:
         try:
@@ -628,6 +630,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 friend_id=friend_id,
                 world_tag=world_tag,
                 include_self=include_self,
+                limit=limit,
+                offset=offset,
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="not found") from error
