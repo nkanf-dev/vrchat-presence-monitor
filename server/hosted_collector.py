@@ -8,7 +8,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from vrchat_monitor.vrchat import (
     VRChatClient,
@@ -314,6 +314,31 @@ class HostedCollectorManager:
         self._blocked: set[str] = set()
         self._world_locks: dict[str, threading.Lock] = {}
         self._world_retry_at: dict[str, float] = {}
+        self._world_observer: Callable[[str, list[str]], None] | None = None
+
+    def set_world_observer(
+        self, observer: Callable[[str, list[str]], None] | None
+    ) -> None:
+        self._world_observer = observer
+
+    def _notify_worlds(self, tenant_id: str, friends: list[dict[str, Any]]) -> None:
+        observer = self._world_observer
+        if observer is None:
+            return
+        world_ids = sorted(
+            {
+                world_id
+                for friend in friends
+                if (world_id := world_id_from_location(str(friend.get("location") or "")))
+            }
+        )
+        if not world_ids:
+            return
+        try:
+            observer(tenant_id, world_ids)
+        except Exception:
+            # World enrichment is independent from presence collection.
+            return
 
     def start(self) -> None:
         if not self._thread.is_alive():
@@ -519,6 +544,7 @@ class HostedCollectorManager:
                     expected_interval_seconds=self.poll_seconds,
                     duration_ms=int((time.monotonic() - started) * 1000),
                 )
+            self._notify_worlds(tenant_id, normalized)
             with self._lock:
                 self._backoff.pop(tenant_id, None)
             self._schedule(tenant_id, self.poll_seconds + random.uniform(0, 20))
@@ -625,6 +651,39 @@ class HostedCollectorManager:
                 [transition] if transition is not None else [],
                 "hosted-pipeline",
             )
+        self._notify_worlds(session.tenant_id, [friend])
+
+    def fetch_world(self, tenant_id: str, world_id: str) -> dict[str, Any]:
+        """Fetch one world through a tenant session for the background resolver."""
+        normalized = world_id_from_location(world_id)
+        if not normalized:
+            raise VRChatError("世界 ID 格式异常", 400)
+        with self._lock:
+            session = self._sessions.get(tenant_id)
+        if session is None:
+            account = next(
+                (
+                    row
+                    for row in self.store.active_vrchat_accounts()
+                    if row["tenant_id"] == tenant_id
+                ),
+                None,
+            )
+            if account is not None:
+                session = self._start_session(account)
+        if session is None or not self._is_current(session):
+            raise VRChatError("需要重新登录 VRChat", 401)
+        try:
+            raw = session.client.world(normalized)
+            self._persist_rotated_cookie(session)
+            return raw
+        except VRChatError as error:
+            if error.status == 401:
+                self.store.mark_vrchat_account_result(
+                    tenant_id, error="需要重新登录 VRChat", reconnect=True
+                )
+                self.disconnect(tenant_id)
+            raise
 
     def world_info(self, tenant_id: str, world_id: str) -> dict[str, Any]:
         normalized = world_id_from_location(world_id)

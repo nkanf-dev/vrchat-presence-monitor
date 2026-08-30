@@ -72,6 +72,7 @@ from .session_crypto import SessionCipher
 from .settings import Settings
 from .storage import Store
 from .vrchat_auth import VRChatAuthService
+from .worlds import DiscoveryService, WorldResolver, WorldService
 
 
 LOGGER = logging.getLogger("presence_monitor.hosted")
@@ -139,6 +140,25 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if config.hosted_vrchat_login
         else None
     )
+
+    def fetch_world(tenant_id: str, world_id: str) -> dict[str, Any]:
+        if hosted_collector is None:
+            raise VRChatError("世界信息暂时不可用", 503)
+        return hosted_collector.fetch_world(tenant_id, world_id)
+
+    world_resolver = WorldResolver(
+        database,
+        fetch_world,
+        max_backoff_seconds=config.hosted_collector_max_backoff_seconds,
+    )
+    worlds = WorldService(database, world_resolver)
+    discovery = DiscoveryService(database, world_resolver)
+    if hosted_collector is not None:
+        def observe_worlds(tenant_id: str, world_ids: list[str]) -> None:
+            for world_id in world_ids:
+                world_resolver.enqueue(tenant_id, world_id)
+
+        hosted_collector.set_world_observer(observe_worlds)
     limiter = LoginRateLimiter(config.login_attempts, config.login_window_seconds)
     collector_limiter = RequestRateLimiter(config.collector_requests_per_minute, 60)
     import_limiter = RequestRateLimiter(config.import_requests, config.import_window_seconds)
@@ -148,9 +168,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         database.cleanup_expired_sessions()
         if hosted_collector:
             hosted_collector.start()
+        world_resolver.start()
         try:
             yield
         finally:
+            world_resolver.stop()
             if hosted_collector:
                 hosted_collector.stop()
 
@@ -169,6 +191,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     app.state.search = search
     app.state.insights = insights
     app.state.tenant_health = tenant_health
+    app.state.world_resolver = world_resolver
+    app.state.worlds = worlds
+    app.state.discovery = discovery
     app.state.hosted_collector = hosted_collector
 
     @app.exception_handler(HTTPException)
@@ -546,25 +571,58 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         world_id: str = PathParam(min_length=1, max_length=128),
         auth: Authenticated = Depends(viewer),
     ) -> dict[str, Any]:
-        if hosted_collector is None:
-            cached = database.world_cache_get(world_id)
-            if cached is not None:
-                return cached
-            raise HTTPException(status_code=503, detail="世界解析暂不可用")
         try:
-            return hosted_collector.world_info(auth.row["tenant_id"], world_id)
-        except VRChatError as error:
-            response_status = error.status if error.status in {400, 401, 404, 429} else 502
-            headers = (
-                {"Retry-After": str(max(1, int(error.retry_after or 60)))}
-                if response_status == 429
-                else None
+            return worlds.detail(auth.row["tenant_id"], world_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/world-library")
+    def world_library(
+        q: str = Query(default="", max_length=160),
+        author: str = Query(default="", max_length=160),
+        friend_id: str = Query(default="", max_length=128),
+        tag_id: str = Query(default="", max_length=128),
+        cursor: str = Query(default="", max_length=256),
+        limit: int = Query(default=50, ge=1, le=100),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        try:
+            return worlds.library(
+                auth.row["tenant_id"],
+                query=q,
+                author=author,
+                friend_id=friend_id,
+                tag_id=tag_id,
+                cursor=cursor,
+                limit=limit,
             )
-            raise HTTPException(
-                status_code=response_status,
-                detail=str(error),
-                headers=headers,
-            ) from error
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/discovery/worlds")
+    def discover_worlds(
+        days: int = Query(default=7),
+        friend_id: str = Query(default="", max_length=128),
+        tag_id: str = Query(default="", max_length=128),
+        include_self: bool = Query(default=True),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        try:
+            return discovery.discover(
+                auth.row["tenant_id"],
+                days,
+                friend_id,
+                tag_id,
+                include_self,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/v1/world-image")
     def world_image(
