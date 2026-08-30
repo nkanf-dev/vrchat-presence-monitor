@@ -17,10 +17,12 @@ import {
   verifyVrchat2fa,
 } from './api';
 import { AppShell } from './components/AppShell';
+import { AnalysisNav } from './components/AnalysisNav';
 import { FriendDialog } from './components/FriendDialog';
 import { LoadingScreen, LoginScreen, OfflineScreen, VrchatReconnectDialog } from './components/AuthScreens';
+import { MoreNav } from './components/MoreNav';
 import { StatusBanner } from './components/StatusBanner';
-import { useHashView, usePageScrollRestoration } from './navigation';
+import { useHashRoute, usePageScrollRestoration } from './navigation';
 import { DataView } from './views/DataView';
 import { HistoryView } from './views/HistoryView';
 import { OverviewView } from './views/OverviewView';
@@ -42,10 +44,66 @@ function InitialContentError({ message, onRetry }: { message: string; onRetry: (
   );
 }
 
+function AnalysisLanding({ section }: { section: 'relationships' | 'discover' }) {
+  const content = section === 'relationships'
+    ? {
+        kicker: 'Relationships',
+        title: '好友关系',
+        copy: '从共同在线和一起游玩的记录中查看好友之间的联系。',
+      }
+    : {
+        kicker: 'Discover',
+        title: '世界发现',
+        copy: '从好友去过的世界中发现新的去处。',
+      };
+  return (
+    <>
+      <header className="page-heading">
+        <div>
+          <p className="kicker">{content.kicker}</p>
+          <h1 tabIndex={-1}>{content.title}</h1>
+          <p>{content.copy}</p>
+        </div>
+      </header>
+      <section className="panel empty-state">
+        <strong>选择一个分析视图</strong>
+        <p>前往每日在线查看时段规律，或在世界时间轴中回看游玩地点。</p>
+      </section>
+    </>
+  );
+}
+
+function SettingsView() {
+  return (
+    <>
+      <header className="page-heading">
+        <div>
+          <p className="kicker">Settings</p>
+          <h1 tabIndex={-1}>设置</h1>
+          <p>管理当前账户与数据采集。</p>
+        </div>
+      </header>
+      <section className="panel empty-state" aria-labelledby="account-settings-title">
+        <strong id="account-settings-title">账户与连接</strong>
+        <p>点击右上角头像，可以重新连接 VRChat、切换账号或退出当前设备。</p>
+      </section>
+    </>
+  );
+}
+
 function Dashboard({ identity }: { identity: { tenant_id: string; name: string } }) {
   const queryClient = useQueryClient();
-  const { view, navigate } = useHashView();
-  usePageScrollRestoration(view);
+  const {
+    parameters,
+    route,
+    routeKey,
+    view,
+    navigateArea,
+    navigateAnalysis,
+    navigateMore,
+    navigateView,
+  } = useHashRoute();
+  usePageScrollRestoration(routeKey);
   const [selectedFriend, setSelectedFriend] = useState<Friend | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [reconnectOpen, setReconnectOpen] = useState(false);
@@ -63,13 +121,13 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
     queryKey: ['friends', 'overview'],
     queryFn: () => getFriends({ status: 'online', limit: 50, offset: 0 }),
     refetchInterval: 60_000,
-    enabled: view === 'overview',
+    enabled: route.area === 'online',
   });
   const eventsQuery = useQuery({
     queryKey: ['events', 'overview'],
     queryFn: () => getEvents({ limit: 8, offset: 0 }),
     refetchInterval: 60_000,
-    enabled: view === 'overview',
+    enabled: route.area === 'online',
   });
   const activeFetches = useIsFetching();
 
@@ -80,13 +138,13 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
   }, [queryClient, unauthorized]);
 
   useEffect(() => {
-    if (view === 'overview' && overviewQuery.isPending) return;
+    if (route.area === 'online' && overviewQuery.isPending) return;
     const frame = window.requestAnimationFrame(() => {
       const title = document.querySelector<HTMLElement>('#main-content h1');
       title?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [overviewQuery.isPending, view]);
+  }, [overviewQuery.isPending, route.area, routeKey]);
 
   const refresh = async () => {
     await Promise.all([
@@ -141,6 +199,9 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
     people: '玩家列表',
     history: '状态历史',
     data: '数据与备份',
+    settings: '设置',
+    relationships: '好友关系',
+    discover: '世界发现',
   }[view];
 
   return (
@@ -148,10 +209,11 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       identity={identity}
       overview={overviewQuery.data}
       refreshFailed={refreshFailed}
-      view={view}
+      route={route}
+      parameters={parameters}
       refreshing={refreshing}
       accountBusy={loggingOut || disconnectMutation.isPending}
-      onNavigate={navigate}
+      onNavigate={navigateArea}
       onRefresh={() => void syncAndRefresh()}
       onLogout={signOut}
       onDisconnect={disconnect}
@@ -170,6 +232,12 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
             setReconnectOpen(true);
           }}
         />
+      )}
+      {route.area === 'analysis' && (
+        <AnalysisNav section={route.section} parameters={parameters} onNavigate={navigateAnalysis} />
+      )}
+      {route.area === 'more' && (
+        <MoreNav section={route.section} parameters={parameters} onNavigate={navigateMore} />
       )}
       {view === 'overview' && overviewQuery.isPending ? (
         <section className="dashboard-skeleton" aria-label="正在加载状态总览" aria-busy="true">
@@ -200,8 +268,8 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
           onRetryPeople={() => void peopleQuery.refetch()}
           onRetryEvents={() => void eventsQuery.refetch()}
           onOpenFriend={setSelectedFriend}
-          onNavigatePeople={() => navigate('people')}
-          onNavigateHistory={() => navigate('history')}
+          onNavigatePeople={() => navigateView('people')}
+          onNavigateHistory={() => navigateView('history')}
         />
       ) : null}
       {view === 'daily' && <DailyView />}
@@ -209,6 +277,8 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       {view === 'people' && <PeopleView onOpenFriend={setSelectedFriend} />}
       {view === 'history' && <HistoryView />}
       {view === 'data' && <DataView />}
+      {(view === 'relationships' || view === 'discover') && <AnalysisLanding section={view} />}
+      {view === 'settings' && <SettingsView />}
       <FriendDialog friend={selectedFriend} onClose={() => setSelectedFriend(null)} />
       <VrchatReconnectDialog
         open={reconnectOpen}

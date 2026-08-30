@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
 
@@ -23,8 +23,13 @@ const renderApp = () => {
 };
 
 describe('product state machine', () => {
+  beforeEach(() => {
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+  });
+
   afterEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     window.location.hash = '';
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -105,6 +110,76 @@ describe('product state machine', () => {
         body: JSON.stringify({ username: 'alice@example.com', password: 'correct horse' }),
       }),
     ]);
+  });
+
+  it('renders exactly four desktop and mobile product areas', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/v1/me') {
+        return Promise.resolve(
+          jsonResponse(200, {
+            authenticated: true,
+            migrated: false,
+            user: { tenant_id: 'ten_1', name: 'Alice 的监控' },
+          }),
+        );
+      }
+      if (path === '/v1/overview') {
+        return Promise.resolve(
+          jsonResponse(200, {
+            tracked_count: 0,
+            online_count: 0,
+            event_total: 0,
+            change_count_7d: 0,
+            status_counts: {},
+            last_sync: null,
+            collector_error: '',
+            collector_state: 'never',
+            sync_age_seconds: null,
+            stale_after_seconds: 300,
+          }),
+        );
+      }
+      if (path.startsWith('/v1/friends?')) {
+        return Promise.resolve(jsonResponse(200, { items: [], total: 0, limit: 50, offset: 0 }));
+      }
+      if (path.startsWith('/v1/events?')) {
+        return Promise.resolve(jsonResponse(200, { items: [], total: 0, limit: 8, offset: 0 }));
+      }
+      return Promise.resolve(jsonResponse(404, { error: 'not found' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    renderApp();
+
+    const desktop = await screen.findByRole('navigation', { name: '主要导航' });
+    const mobile = screen.getByRole('navigation', { name: '移动端主要导航' });
+    expect(within(desktop).getAllByRole('link')).toHaveLength(4);
+    expect(within(mobile).getAllByRole('link')).toHaveLength(4);
+    expect(within(desktop).getAllByRole('link').map((link) => link.textContent)).toEqual([
+      '在线',
+      '玩家',
+      '分析',
+      '更多',
+    ]);
+    expect(within(desktop).getByRole('link', { name: '在线' })).toHaveAttribute('aria-current', 'page');
+    expect(await screen.findByRole('heading', { name: '状态总览' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: '当前在线玩家' })).toBeVisible();
+
+    await user.click(within(desktop).getByRole('link', { name: '分析' }));
+    const analysis = await screen.findByRole('navigation', { name: '分析页面' });
+    expect(within(analysis).getAllByRole('link')).toHaveLength(2);
+    expect(within(analysis).getByRole('link', { name: '每日在线' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    await waitFor(() => {
+      const parameters = new URLSearchParams(window.location.hash.slice(1));
+      expect(parameters.get('area')).toBe('analysis');
+      expect(parameters.get('section')).toBe('daily');
+      expect(parameters.get('view')).toBeNull();
+    });
   });
 
   it('asks only for a verification code when VRChat requires two-factor login', async () => {
@@ -296,6 +371,12 @@ describe('product state machine', () => {
     expect(await screen.findByRole('heading', { name: '状态历史' })).toBeVisible();
     expect(await screen.findByText('Alice')).toBeVisible();
     expect(await screen.findByText('状态摘要暂时无法加载')).toBeVisible();
+    expect(
+      within(screen.getByRole('navigation', { name: '主要导航' })).getByRole('link', { name: '更多' }),
+    ).toHaveAttribute('aria-current', 'page');
+    expect(
+      within(screen.getByRole('navigation', { name: '更多页面' })).getByRole('link', { name: '状态历史' }),
+    ).toHaveAttribute('aria-current', 'page');
     expect(screen.queryByRole('heading', { name: '数据暂时没有加载出来' })).not.toBeInTheDocument();
   });
 

@@ -1,9 +1,183 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 
-export const views = ['overview', 'daily', 'worlds', 'people', 'history', 'data'] as const;
+export const areas = ['online', 'people', 'analysis', 'more'] as const;
+export type Area = (typeof areas)[number];
+
+export const analysisSections = ['daily', 'relationships', 'worlds', 'discover'] as const;
+export type AnalysisSection = (typeof analysisSections)[number];
+
+export const moreSections = ['history', 'data', 'settings'] as const;
+export type MoreSection = (typeof moreSections)[number];
+
+export const views = [
+  'overview',
+  'people',
+  'daily',
+  'relationships',
+  'worlds',
+  'discover',
+  'history',
+  'data',
+  'settings',
+] as const;
 export type View = (typeof views)[number];
 
+type RouteDetails = {
+  person?: string;
+  world?: string;
+  tab?: string;
+};
+
+export type Route =
+  | ({ area: 'online' } & RouteDetails)
+  | ({ area: 'people' } & RouteDetails)
+  | ({ area: 'analysis'; section: AnalysisSection } & RouteDetails)
+  | ({ area: 'more'; section: MoreSection } & RouteDetails);
+
+const legacyRoutes: Record<string, Route> = {
+  overview: { area: 'online' },
+  people: { area: 'people' },
+  daily: { area: 'analysis', section: 'daily' },
+  worlds: { area: 'analysis', section: 'worlds' },
+  history: { area: 'more', section: 'history' },
+  data: { area: 'more', section: 'data' },
+};
+
 const readHash = () => window.location.hash.replace(/^#/, '');
+const HASH_PARAMETERS_CHANGED = 'presence-monitor:hash-parameters-changed';
+
+const routeDetails = (parameters: URLSearchParams): RouteDetails => {
+  const details: RouteDetails = {};
+  const person = parameters.get('person');
+  const world = parameters.get('world');
+  const tab = parameters.get('tab');
+  if (person) details.person = person;
+  if (world) details.world = world;
+  if (tab) details.tab = tab;
+  return details;
+};
+
+export function parseRoute(parameters: URLSearchParams): Route {
+  const details = routeDetails(parameters);
+  const requestedArea = parameters.get('area');
+
+  if (requestedArea === 'online') return { area: 'online', ...details };
+  if (requestedArea === 'people') return { area: 'people', ...details };
+  if (requestedArea === 'analysis') {
+    const requestedSection = parameters.get('section');
+    const section = analysisSections.includes(requestedSection as AnalysisSection)
+      ? (requestedSection as AnalysisSection)
+      : 'daily';
+    return { area: 'analysis', section, ...details };
+  }
+  if (requestedArea === 'more') {
+    const requestedSection = parameters.get('section');
+    const section = moreSections.includes(requestedSection as MoreSection)
+      ? (requestedSection as MoreSection)
+      : 'history';
+    return { area: 'more', section, ...details };
+  }
+
+  const legacy = legacyRoutes[parameters.get('view') ?? ''];
+  return legacy ? { ...legacy, ...details } : { area: 'online', ...details };
+}
+
+export function routeToView(route: Route): View {
+  if (route.area === 'online') return 'overview';
+  if (route.area === 'people') return 'people';
+  return route.section;
+}
+
+const copyDetails = (route: Route): RouteDetails => ({
+  ...(route.person ? { person: route.person } : {}),
+  ...(route.world ? { world: route.world } : {}),
+  ...(route.tab ? { tab: route.tab } : {}),
+});
+
+export function routeForArea(area: Area, current: Route): Route {
+  const details = copyDetails(current);
+  if (area === 'online') return { area, ...details };
+  if (area === 'people') return { area, ...details };
+  if (area === 'analysis') {
+    return {
+      area,
+      section: current.area === 'analysis' ? current.section : 'daily',
+      ...details,
+    };
+  }
+  return {
+    area,
+    section: current.area === 'more' ? current.section : 'history',
+    ...details,
+  };
+}
+
+export function routeForView(view: View, current: Route): Route {
+  const details = copyDetails(current);
+  if (view === 'overview') return { area: 'online', ...details };
+  if (view === 'people') return { area: 'people', ...details };
+  if (analysisSections.includes(view as AnalysisSection)) {
+    return { area: 'analysis', section: view as AnalysisSection, ...details };
+  }
+  return { area: 'more', section: view as MoreSection, ...details };
+}
+
+export function parametersForRoute(parameters: URLSearchParams, route: Route) {
+  const next = new URLSearchParams(parameters);
+  next.delete('view');
+  next.set('area', route.area);
+  if ('section' in route) next.set('section', route.section);
+  else next.delete('section');
+  if (route.person) next.set('person', route.person);
+  if (route.world) next.set('world', route.world);
+  if (route.tab) next.set('tab', route.tab);
+  return next;
+}
+
+export function routeHref(parameters: URLSearchParams, route: Route) {
+  const serialized = parametersForRoute(parameters, route).toString();
+  return serialized ? `#${serialized}` : '#';
+}
+
+export function routeKey(route: Route) {
+  if (route.area === 'analysis' || route.area === 'more') return `${route.area}:${route.section}`;
+  return route.area;
+}
+
+const hashUrl = (serialized: string) => {
+  const suffix = serialized ? `#${serialized}` : '';
+  return `${window.location.pathname}${window.location.search}${suffix}`;
+};
+
+const routeScrollStorageKey = (key: string) => `presence-monitor:scroll:${key}`;
+
+const readRouteScroll = (key: string) => {
+  try {
+    const value = Number(window.sessionStorage.getItem(routeScrollStorageKey(key)) ?? 0);
+    return Number.isFinite(value) ? Math.max(0, value) : 0;
+  } catch {
+    return 0;
+  }
+};
+
+const rememberRouteScroll = (key: string, value: number) => {
+  const top = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+  try {
+    if (top > 0) window.sessionStorage.setItem(routeScrollStorageKey(key), String(top));
+    else window.sessionStorage.removeItem(routeScrollStorageKey(key));
+  } catch {
+    // Navigation remains fully represented by the hash when storage is unavailable.
+  }
+};
+
+const replaceScrollPosition = (value: number, key: string) => {
+  const top = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+  rememberRouteScroll(key, top);
+  const parameters = new URLSearchParams(readHash());
+  if (top > 0) parameters.set('y', String(top));
+  else parameters.delete('y');
+  window.history.replaceState(window.history.state, '', hashUrl(parameters.toString()));
+};
 
 export function useHashParameters() {
   const [serialized, setSerialized] = useState(readHash);
@@ -12,58 +186,100 @@ export function useHashParameters() {
     const updateFromLocation = () => setSerialized(readHash());
     window.addEventListener('hashchange', updateFromLocation);
     window.addEventListener('popstate', updateFromLocation);
+    window.addEventListener(HASH_PARAMETERS_CHANGED, updateFromLocation);
     return () => {
       window.removeEventListener('hashchange', updateFromLocation);
       window.removeEventListener('popstate', updateFromLocation);
+      window.removeEventListener(HASH_PARAMETERS_CHANGED, updateFromLocation);
     };
   }, []);
 
   const parameters = useMemo(() => new URLSearchParams(serialized), [serialized]);
-  const update = useCallback((values: Record<string, string | number | null>, replace = false) => {
-    const next = new URLSearchParams(readHash());
-    for (const [key, value] of Object.entries(values)) {
-      if (value === null || value === '') next.delete(key);
-      else next.set(key, String(value));
-    }
+  const setParameters = useCallback((next: URLSearchParams, replace = false) => {
     const nextSerialized = next.toString();
     if (nextSerialized === readHash()) return;
     if (replace) {
-      const suffix = nextSerialized ? `#${nextSerialized}` : '';
-      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${suffix}`);
+      window.history.replaceState(window.history.state, '', hashUrl(nextSerialized));
       setSerialized(nextSerialized);
+      window.dispatchEvent(new Event(HASH_PARAMETERS_CHANGED));
     } else {
       window.location.hash = nextSerialized;
     }
   }, []);
 
-  return { parameters, update };
+  const update = useCallback(
+    (values: Record<string, string | number | null>, replace = false) => {
+      const next = new URLSearchParams(readHash());
+      for (const [key, value] of Object.entries(values)) {
+        if (value === null || value === '') next.delete(key);
+        else next.set(key, String(value));
+      }
+      setParameters(next, replace);
+    },
+    [setParameters],
+  );
+
+  return { parameters, update, setParameters };
+}
+
+export function useHashRoute() {
+  const { parameters, setParameters, update } = useHashParameters();
+  const route = useMemo(() => parseRoute(parameters), [parameters]);
+  const currentRouteKey = routeKey(route);
+
+  const navigateRoute = useCallback(
+    (nextRoute: Route) => {
+      replaceScrollPosition(window.scrollY, currentRouteKey);
+      const next = parametersForRoute(new URLSearchParams(readHash()), nextRoute);
+      const nextRouteKey = routeKey(nextRoute);
+      const targetTop = nextRouteKey === currentRouteKey ? window.scrollY : readRouteScroll(nextRouteKey);
+      if (targetTop > 0) next.set('y', String(Math.round(targetTop)));
+      else next.delete('y');
+      setParameters(next);
+    },
+    [currentRouteKey, setParameters],
+  );
+
+  const navigateArea = useCallback(
+    (area: Area) => navigateRoute(routeForArea(area, route)),
+    [navigateRoute, route],
+  );
+  const navigateAnalysis = useCallback(
+    (section: AnalysisSection) => navigateRoute({ area: 'analysis', section, ...copyDetails(route) }),
+    [navigateRoute, route],
+  );
+  const navigateMore = useCallback(
+    (section: MoreSection) => navigateRoute({ area: 'more', section, ...copyDetails(route) }),
+    [navigateRoute, route],
+  );
+  const navigateView = useCallback(
+    (view: View) => navigateRoute(routeForView(view, route)),
+    [navigateRoute, route],
+  );
+
+  return {
+    parameters,
+    update,
+    route,
+    routeKey: currentRouteKey,
+    view: routeToView(route),
+    navigateArea,
+    navigateAnalysis,
+    navigateMore,
+    navigateView,
+  };
 }
 
 export function useHashView() {
-  const { parameters, update } = useHashParameters();
-  const value = parameters.get('view');
-  const view = views.includes(value as View) ? (value as View) : 'overview';
-
-  const navigate = (next: View) => {
-    update({ view: next, y: null });
-  };
-
-  return { view, navigate };
+  const state = useHashRoute();
+  return { ...state, navigate: state.navigateView };
 }
 
-const replaceScrollPosition = (value: number) => {
-  const parameters = new URLSearchParams(readHash());
-  if (value > 0) parameters.set('y', String(Math.round(value)));
-  else parameters.delete('y');
-  const serialized = parameters.toString();
-  const suffix = serialized ? `#${serialized}` : '';
-  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${suffix}`);
-};
-
-export function usePageScrollRestoration(view: View) {
+export function usePageScrollRestoration(key: string) {
   useLayoutEffect(() => {
-    const value = Number(new URLSearchParams(readHash()).get('y') ?? 0);
-    const top = Number.isFinite(value) ? Math.max(0, value) : 0;
+    const hashValue = Number(new URLSearchParams(readHash()).get('y') ?? Number.NaN);
+    const top = Number.isFinite(hashValue) ? Math.max(0, hashValue) : readRouteScroll(key);
+    rememberRouteScroll(key, top);
     const restore = () => window.scrollTo({ top, behavior: 'instant' });
     const first = window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
     const delayed = window.setTimeout(restore, 700);
@@ -71,18 +287,34 @@ export function usePageScrollRestoration(view: View) {
       window.cancelAnimationFrame(first);
       window.clearTimeout(delayed);
     };
-  }, [view]);
+  }, [key]);
 
   useEffect(() => {
-    let timer = 0;
+    let frame = 0;
     const remember = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => replaceScrollPosition(window.scrollY), 180);
+      rememberRouteScroll(key, window.scrollY);
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => replaceScrollPosition(window.scrollY, key));
     };
     window.addEventListener('scroll', remember, { passive: true });
     return () => {
       window.removeEventListener('scroll', remember);
-      window.clearTimeout(timer);
+      window.cancelAnimationFrame(frame);
     };
-  }, [view]);
+  }, [key]);
+
+  useEffect(() => {
+    let frame = 0;
+    const restoreHistoryPosition = () => {
+      const value = Number(new URLSearchParams(readHash()).get('y') ?? 0);
+      const top = Number.isFinite(value) ? Math.max(0, value) : 0;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => window.scrollTo({ top, behavior: 'instant' }));
+    };
+    window.addEventListener('popstate', restoreHistoryPosition);
+    return () => {
+      window.removeEventListener('popstate', restoreHistoryPosition);
+      window.cancelAnimationFrame(frame);
+    };
+  }, []);
 }

@@ -1,42 +1,52 @@
 import {
-  CalendarRange,
-  Database,
-  History,
-  LayoutDashboard,
-  MapPinned,
+  Activity,
+  ChartNoAxesCombined,
+  Ellipsis,
   RefreshCw,
   Users,
 } from 'lucide-react';
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 
 import type { Identity, Overview } from '../api';
 import { formatDateTime } from '../format';
-import type { View } from '../navigation';
+import { routeForArea, routeHref, type Area, type Route } from '../navigation';
 import { AccountMenu } from './AccountMenu';
 import { Brand } from './Brand';
 
 const items = [
-  { id: 'overview', label: '总览', icon: LayoutDashboard },
-  { id: 'daily', label: '每日', icon: CalendarRange },
-  { id: 'worlds', label: '世界', icon: MapPinned },
+  { id: 'online', label: '在线', icon: Activity },
   { id: 'people', label: '玩家', icon: Users },
-  { id: 'history', label: '历史', icon: History },
-  { id: 'data', label: '数据', icon: Database },
-] as const;
+  { id: 'analysis', label: '分析', icon: ChartNoAxesCombined },
+  { id: 'more', label: '更多', icon: Ellipsis },
+] as const satisfies ReadonlyArray<{ id: Area; label: string; icon: typeof Activity }>;
 
-function Navigation({ view, onNavigate }: { view: View; onNavigate: (view: View) => void }) {
+const shouldHandleNavigation = (event: MouseEvent<HTMLAnchorElement>) =>
+  event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+
+function Navigation({
+  route,
+  parameters,
+  label,
+  onNavigate,
+}: {
+  route: Route;
+  parameters: URLSearchParams;
+  label: string;
+  onNavigate: (area: Area) => void;
+}) {
   return (
-    <nav className="product-nav" aria-label="主要导航">
+    <nav className="product-nav" aria-label={label}>
       {items.map((item) => {
         const Icon = item.icon;
-        const active = item.id === view;
+        const active = item.id === route.area;
         return (
           <a
             key={item.id}
-            href={`#view=${item.id}`}
+            href={routeHref(parameters, routeForArea(item.id, route))}
             className={active ? 'nav-link active' : 'nav-link'}
             aria-current={active ? 'page' : undefined}
             onClick={(event) => {
+              if (!shouldHandleNavigation(event)) return;
               event.preventDefault();
               onNavigate(item.id);
             }}
@@ -54,7 +64,8 @@ export function AppShell({
   identity,
   overview,
   refreshFailed,
-  view,
+  route,
+  parameters,
   refreshing,
   accountBusy,
   onNavigate,
@@ -66,10 +77,11 @@ export function AppShell({
   identity: Identity;
   overview: Overview | undefined;
   refreshFailed: boolean;
-  view: View;
+  route: Route;
+  parameters: URLSearchParams;
   refreshing: boolean;
   accountBusy: boolean;
-  onNavigate: (view: View) => void;
+  onNavigate: (area: Area) => void;
   onRefresh: () => void;
   onLogout: () => Promise<void> | void;
   onDisconnect: () => Promise<void> | void;
@@ -95,7 +107,7 @@ export function AppShell({
           <span className="sidebar-label">你的空间</span>
           <strong>{identity.name}</strong>
         </div>
-        <Navigation view={view} onNavigate={onNavigate} />
+        <Navigation route={route} parameters={parameters} label="主要导航" onNavigate={onNavigate} />
         <div className="sidebar-footer">
           <div className="connection-summary">
             <span className={connected ? 'signal-dot connected' : 'signal-dot'} aria-hidden="true" />
@@ -133,7 +145,12 @@ export function AppShell({
       </div>
 
       <div className="mobile-nav-wrap">
-        <Navigation view={view} onNavigate={onNavigate} />
+        <Navigation
+          route={route}
+          parameters={parameters}
+          label="移动端主要导航"
+          onNavigate={onNavigate}
+        />
       </div>
     </div>
   );
