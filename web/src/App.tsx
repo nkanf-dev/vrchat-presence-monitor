@@ -289,11 +289,11 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
         initialFriend={friendPreview?.id === friendDetailId ? friendPreview : null}
         onClose={() => {
           setFriendPreview(null);
-          update({ personDetail: null, personTab: null });
+          update({ personDetail: null, personTab: null }, true);
         }}
         onOpenWorld={openWorld}
       />
-      <WorldDialog worldId={worldDetailId} onClose={() => update({ worldDetail: null })} />
+      <WorldDialog worldId={worldDetailId} onClose={() => update({ worldDetail: null }, true)} />
       <VrchatReconnectDialog
         open={reconnectOpen}
         pending={reconnectMutation.isPending || reconnectTwoFactorMutation.isPending}
