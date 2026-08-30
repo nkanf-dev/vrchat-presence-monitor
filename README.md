@@ -1,24 +1,30 @@
 # VRChat Presence Monitor
 
-把短暂的好友状态，变成可以回看的时间线。
+[![CI](https://github.com/nkanf-dev/vrchat-presence-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/nkanf-dev/vrchat-presence-monitor/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/nkanf-dev/vrchat-presence-monitor/actions/workflows/codeql.yml/badge.svg)](https://github.com/nkanf-dev/vrchat-presence-monitor/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/nkanf-dev/vrchat-presence-monitor?include_prereleases&sort=semver)](https://github.com/nkanf-dev/vrchat-presence-monitor/releases)
+[![License](https://img.shields.io/github/license/nkanf-dev/vrchat-presence-monitor)](LICENSE)
 
-Presence Monitor 常驻在服务器上。用户直接用 VRChat 登录，关掉网页后采集仍会继续；再次打开时会回到自己的数据空间，不需要每次重新验证。
+把短暂的好友状态，变成随时可以回看的时间线。
 
-[打开在线实例](https://vrc.kanglives.top)
+Presence Monitor 在服务器上持续记录 VRChat 好友动态。登录一次，关掉网页后记录仍会继续；再次打开时，可以直接查看自己的在线好友、历史状态、活跃时段与去过的世界。
 
-## 你能看到什么
+**[打开在线实例](https://vrc.kanglives.top)**
 
-- 好友与本人当前状态、平台、位置、头像和公开资料
-- 可搜索、可分页的完整状态事件历史
-- 每日在线时间轴，以及精确到每位好友、每个小时的平均热力图
-- 在线时间与游玩世界叠加视图，支持单人时间轴、全员对比和世界筛选
-- 世界名称、缩略图、作者、容量、标签和简介
-- 近 30 天游玩时间与好友排行
-- 用户自己的 JSON 导入、导出和可恢复备份
+## 主要功能
 
-登录状态分为两层：浏览器会话只负责打开面板，服务器上的 VRChat 会话负责持续采集。退出某台设备不会停止采集；只有明确执行“断开 VRChat”才会停止。
+- **当前在线**：查看好友与本人状态、位置、平台、头像和公开资料
+- **玩家洞察**：搜索玩家，查看在线时长、共同在线、一起游玩、常去世界与名称变化
+- **每日在线**：按天叠加所有玩家的在线时间轴，并查看每位玩家的小时热力图
+- **世界时间轴**：把玩家在线时间与游玩世界放在同一条时间线上，支持筛选与详情弹窗
+- **世界发现**：按热度和上升趋势发现好友近期去过的世界，浏览缩略图、作者、容量与简介
+- **状态历史**：搜索、筛选和分页浏览全部变化记录
+- **数据备份**：独立导入或导出玩家、状态、备注、标签、偏好与采集记录
+- **多设备使用**：同一账号可以在不同设备继续使用，服务器会持续维护采集会话
 
-## Docker 部署
+桌面端与移动端使用同一套界面。页面位置、筛选条件和已打开的详情会保留在链接中，刷新后可以继续浏览。
+
+## 自行部署
 
 需要 Docker Engine 24+ 与 Docker Compose v2。
 
@@ -34,15 +40,15 @@ chmod 600 .secrets/*
 docker compose up -d --build vrchat-monitor backup-scheduler
 ```
 
-应用默认只监听 `127.0.0.1:8080`。请在生产环境前置 HTTPS 反向代理；健康检查地址为 `/readyz`。
+应用默认监听 `127.0.0.1:8080`，健康检查地址为 `/readyz`。生产环境请通过 HTTPS 反向代理访问。
 
-仓库内置 Cloudflare Tunnel 服务。把 remotely-managed tunnel token 写入 `.secrets/tunnel_token` 后启动：
+仓库也内置了 Cloudflare Tunnel 服务。把 remotely-managed tunnel token 写入 `.secrets/tunnel_token` 后启动：
 
 ```bash
 docker compose --profile tunnel up -d cloudflared
 ```
 
-常用配置可以写入 `.env`：
+常用设置可以写入 `.env`：
 
 ```dotenv
 TZ=Asia/Shanghai
@@ -51,25 +57,31 @@ HOSTED_COLLECTOR_POLL_SECONDS=180
 HOSTED_COLLECTOR_CONCURRENCY=3
 ```
 
-## 数据与备份
+更完整的部署、迁移与恢复步骤见 [部署说明](docs/deployment.md)。
 
-SQLite 主库保存在 Docker volume `presence-monitor_monitor-data`。创建一致性快照不会中断采集：
+## 备份与恢复
+
+SQLite 数据库保存在 Docker volume `presence-monitor_monitor-data`。定时备份服务每小时生成快照并检查数据库完整性，也可以随时手动创建：
 
 ```bash
 docker compose --profile tools run --rm backup
 ```
 
-快照写入 `./backups`，生成后会自动检查 SQLite 完整性。需要异地备份时可启用仓库内的 Cloudflare R2 Worker 与 `offsite-backup` profile；恢复流程见 [部署说明](docs/deployment.md)。每位用户也可以在面板中独立导入或导出自己的数据。
+快照写入 `./backups`。需要异地副本时，可以启用仓库中的 Cloudflare R2 备份服务。每位用户也能从网页中单独导出或恢复自己的数据。
 
-## 工作方式
+## 项目结构
 
-FastAPI 负责登录、租户隔离、查询与导入导出；后台采集器为每个 VRChat 账号维护独立会话，以 Pipeline 事件实时更新，并用低频 REST 同步校准。React 前端只读取当前浏览器会话对应的租户数据。
+```text
+server/             FastAPI、多租户会话、采集与查询
+web/                React 19、TypeScript、Vite 前端
+infra/              Cloudflare R2 备份组件
+scripts/            部署、备份与维护工具
+tests/              服务端测试
+```
 
-VRChat 密码只用于完成登录请求，不写入数据库。登录成功后保存的是 AES-GCM 加密的 VRChat 会话；部署时生成的 `vrchat_session_key` 是解密所需的唯一密钥，应与数据库备份分开保管。
+服务器为每个 VRChat 账号维护独立会话，通过 Pipeline 实时事件与低频 REST 同步更新记录。展示、采集和存储模块彼此解耦，外部采集器也可以通过 `/v1/telemetry` 接入同一数据模型。
 
-采集器与展示层通过存储接口解耦。默认由服务器持续采集，也可以让外部采集器通过 `/v1/telemetry` 写入同一数据模型。
-
-## 开发
+## 本地开发
 
 ```bash
 python -m pip install --require-hashes -r requirements-dev.txt
@@ -82,7 +94,7 @@ npm test
 npm run build
 ```
 
-项目使用 Python 3.11+、FastAPI、SQLite、React、TypeScript 和 Vite，平台无关。
+项目支持 Python 3.11+ 与 Node.js 20.19+，可在常见 Linux、macOS 和 Windows 开发环境中运行。
 
 ## License
 
