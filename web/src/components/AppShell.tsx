@@ -12,6 +12,7 @@ import { formatDateTime } from '../format';
 import { routeForArea, routeHref, type Area, type Route } from '../navigation';
 import { AccountMenu } from './AccountMenu';
 import { Brand } from './Brand';
+import { GlobalSearch } from './GlobalSearch';
 
 const items = [
   { id: 'online', label: '在线', icon: Activity },
@@ -127,6 +128,7 @@ export function AppShell({
             <strong>云端状态空间</strong>
           </div>
           <div className="topbar-actions">
+            <GlobalSearch />
             <button className="icon-button" onClick={onRefresh} disabled={refreshing} aria-label="刷新当前数据">
               <RefreshCw className={refreshing ? 'spinning' : ''} size={19} aria-hidden="true" />
             </button>
