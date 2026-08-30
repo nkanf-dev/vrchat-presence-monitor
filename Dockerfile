@@ -24,6 +24,7 @@ COPY --chown=app:app vrchat_monitor ./vrchat_monitor
 COPY --chown=app:app \
     scripts/backup_format.py \
     scripts/backup_hosted.py \
+    scripts/proxy_relay.py \
     scripts/r2_backup.py \
     scripts/restore_hosted.py \
     ./scripts/

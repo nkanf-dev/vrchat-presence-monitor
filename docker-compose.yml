@@ -14,6 +14,9 @@ services:
       SESSION_DAYS: "${SESSION_DAYS:-365}"
       HOSTED_COLLECTOR_POLL_SECONDS: "${HOSTED_COLLECTOR_POLL_SECONDS:-180}"
       HOSTED_COLLECTOR_CONCURRENCY: "${HOSTED_COLLECTOR_CONCURRENCY:-3}"
+      HTTP_PROXY: "${VRCHAT_HTTP_PROXY:-}"
+      HTTPS_PROXY: "${VRCHAT_HTTPS_PROXY:-}"
+      NO_PROXY: "${VRCHAT_NO_PROXY:-127.0.0.1,localhost,vrchat-monitor}"
       COOKIE_SECURE: always
       TRUST_PROXY_HEADERS: "1"
       MAX_IMPORT_BYTES: "${MAX_IMPORT_BYTES:-33554432}"
@@ -48,6 +51,35 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+  proxy-relay:
+    image: presence-monitor:local
+    profiles: ["proxy"]
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["python", "-m", "scripts.proxy_relay"]
+    command:
+      - --listen-host
+      - "${PROXY_RELAY_LISTEN_HOST:-172.18.0.1}"
+      - --listen-port
+      - "${PROXY_RELAY_LISTEN_PORT:-17890}"
+      - --upstream-host
+      - "${PROXY_RELAY_UPSTREAM_HOST:-127.0.0.1}"
+      - --upstream-port
+      - "${PROXY_RELAY_UPSTREAM_PORT:-7890}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
 
   cloudflared:
     image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
