@@ -4,13 +4,17 @@
 .codex
 .github
 .venv
+.pytest_cache
 apks
 captures
 logs
 research
 docs
 web/node_modules
+web/dist
 **/node_modules
+**/__pycache__
+**/*.py[cod]
 **/.wrangler
 **/.wrangler-*
 web/*.tsbuildinfo
