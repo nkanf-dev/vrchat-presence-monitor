@@ -27,7 +27,7 @@ const chartBase = (extra: EChartsCoreOption): EChartsCoreOption => ({
   animationDuration: 350,
   backgroundColor: 'transparent',
   textStyle: { color: textColor, fontFamily: 'Inter, system-ui, sans-serif' },
-  tooltip: { trigger: 'item', backgroundColor: '#0b1118', borderColor: '#39495c', textStyle: { color: '#f5f7fa' } },
+  tooltip: { trigger: 'item', appendTo: 'body', backgroundColor: '#0b1118', borderColor: '#39495c', textStyle: { color: '#f5f7fa' } },
   aria: { enabled: true },
   ...extra,
 });
@@ -74,7 +74,7 @@ function DistributionPanel({ data, kind }: { data: DashboardPanelData; kind: 'st
   const option = useMemo(() => chartBase({
     color: [...colors],
     legend: { type: 'scroll', orient: 'vertical', right: 2, top: 'middle', textStyle: { color: textColor } },
-    tooltip: { trigger: 'item', valueFormatter: (value: unknown) => `${Number(value).toLocaleString('zh-CN')} 位` },
+    tooltip: { trigger: 'item', appendTo: 'body', valueFormatter: (value: unknown) => `${Number(value).toLocaleString('zh-CN')} 位` },
     series: [{ type: 'pie', radius: ['48%', '72%'], center: ['34%', '52%'], label: { show: false }, data: items }],
   }), [items]);
   return items.length ? <>
@@ -101,7 +101,7 @@ function RankingPanel({ data, kind, rangeDays }: { data: DashboardPanelData; kin
     grid: { left: 12, right: 26, top: 8, bottom: 8, containLabel: true },
     xAxis: { type: 'value', axisLabel: { color: faintColor, formatter: isWorld ? '{value}m' : '{value}h' }, splitLine: { lineStyle: { color: lineColor } } },
     yAxis: { type: 'category', inverse: true, data: names, axisLabel: { color: textColor, width: 150, overflow: 'truncate' }, axisTick: { show: false }, axisLine: { show: false } },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: (value: unknown) => isWorld ? `${Math.round(Number(value))} 分钟` : `${Number(value).toFixed(1)} 小时` },
+    tooltip: { trigger: 'axis', appendTo: 'body', axisPointer: { type: 'shadow' }, valueFormatter: (value: unknown) => isWorld ? `${Math.round(Number(value))} 分钟` : `${Number(value).toFixed(1)} 小时` },
     series: [{ type: 'bar', data: values, barMaxWidth: 18, itemStyle: { borderRadius: [0, 6, 6, 0] } }],
   }), [isWorld, names, values]);
   const columns: ChartDataColumn<Record<string, unknown>>[] = isWorld ? [
@@ -125,7 +125,7 @@ function ChangesPanel({ data, rangeDays }: { data: DashboardPanelData; rangeDays
     grid: { left: 8, right: 18, top: 12, bottom: 8, containLabel: true },
     xAxis: { type: 'category', boundaryGap: false, data: rows.map((row) => text(row.day).slice(5)), axisLabel: { color: faintColor }, axisLine: { lineStyle: { color: lineColor } } },
     yAxis: { type: 'value', minInterval: 1, axisLabel: { color: faintColor }, splitLine: { lineStyle: { color: lineColor } } },
-    tooltip: { trigger: 'axis', valueFormatter: (value: unknown) => `${Number(value)} 次` },
+    tooltip: { trigger: 'axis', appendTo: 'body', valueFormatter: (value: unknown) => `${Number(value)} 次` },
     series: [{ type: 'line', data: rows.map((row) => number(row.changes)), smooth: true, symbolSize: 6, areaStyle: { opacity: 0.12 }, lineStyle: { width: 3 } }],
   }), [rows]);
   return rows.length ? <>
@@ -156,7 +156,7 @@ function HeatmapPanel({ data, rangeDays }: { data: DashboardPanelData; rangeDays
     xAxis: { type: 'category', data: Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, '0')), axisLabel: { color: faintColor }, splitArea: { show: true }, axisTick: { show: false } },
     yAxis: { type: 'category', data: rows.map((row) => row.name), axisLabel: { color: textColor, width: 130, overflow: 'truncate' }, axisTick: { show: false }, axisLine: { show: false }, splitArea: { show: true } },
     visualMap: { min: 0, max: 100, show: false, inRange: { color: ['#121c24', '#315d55', '#76ac60', '#b6f36b'] } },
-    tooltip: { position: 'top', formatter: (params: unknown) => {
+    tooltip: { appendTo: 'body', position: 'top', formatter: (params: unknown) => {
       const value = (params as { value?: [number, number, number] }).value;
       return value ? `${escapeHtml(rows[value[1]]?.name ?? '')}<br/>${String(value[0]).padStart(2, '0')}:00 · 在线比例 ${value[2]}%` : '';
     } },

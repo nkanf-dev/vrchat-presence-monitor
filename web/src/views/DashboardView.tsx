@@ -74,12 +74,12 @@ const validRange = (value: string | null): DashboardDocument['range_days'] | nul
 };
 
 const samplePanels = (): DashboardPanelModel[] => [
-  { id: 'online-now', kind: 'online-now', title: '当前在线', x: 0, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
-  { id: 'tracked-count', kind: 'tracked-count', title: '追踪人数', x: 3, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
-  { id: 'status-breakdown', kind: 'status-breakdown', title: '当前状态', x: 6, y: 0, w: 6, h: 7, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
-  { id: 'online-ranking', kind: 'online-ranking', title: '在线时长排行', x: 0, y: 4, w: 6, h: 8, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
-  { id: 'daily-changes', kind: 'daily-changes', title: '每日状态变化', x: 6, y: 7, w: 6, h: 5, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
-  { id: 'friend-heatmap', kind: 'friend-heatmap', title: '好友时段热力', x: 0, y: 12, w: 12, h: 9, range_days: 0, limit: 12, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
+  { id: 'online-now', kind: 'online-now', title: '当前在线', x: 0, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
+  { id: 'tracked-count', kind: 'tracked-count', title: '追踪人数', x: 3, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
+  { id: 'status-breakdown', kind: 'status-breakdown', title: '当前状态', x: 6, y: 0, w: 6, h: 7, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
+  { id: 'online-ranking', kind: 'online-ranking', title: '在线时长排行', x: 0, y: 4, w: 6, h: 8, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
+  { id: 'daily-changes', kind: 'daily-changes', title: '每日状态变化', x: 6, y: 7, w: 6, h: 5, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
+  { id: 'friend-heatmap', kind: 'friend-heatmap', title: '好友时段热力', x: 0, y: 12, w: 12, h: 9, range_days: 0, limit: 12, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
 ];
 
 const validRefresh = (value: string | null): DashboardDocument['refresh_seconds'] | null => {
@@ -303,6 +303,7 @@ export function DashboardView({
           platforms: [],
           world_ids: [],
           world_tag: '',
+          world_sort: 'people',
         }],
       };
     });
@@ -484,7 +485,8 @@ export function DashboardView({
             dragConfig={{ enabled: editing && !mobile, bounded: true, handle: '.dashboard-panel-drag' }}
             resizeConfig={{ enabled: editing && !mobile, handles: ['se'] }}
             compactor={verticalCompactor}
-            onLayoutChange={applyLayout}
+            onDragStop={(next) => applyLayout(next)}
+            onResizeStop={(next) => applyLayout(next)}
           >
             {orderedPanels.map((panel) => (
               <article className="dashboard-grid-panel panel" key={panel.id}>
@@ -609,6 +611,12 @@ export function DashboardView({
               </fieldset>
             )}
             {editingPanel.kind === 'world-ranking' && <>
+              <label><span>排序方式</span><select value={editingPanel.world_sort} onChange={(event) => updatePanel(editingPanel.id, { world_sort: event.target.value as DashboardPanelModel['world_sort'] })}>
+                <option value="people">游玩人数</option>
+                <option value="minutes">游玩时长</option>
+                <option value="visits">到访次数</option>
+                <option value="recent">最近到访</option>
+              </select></label>
               <label><span>世界标签</span><input value={editingPanel.world_tag} placeholder="例如 game" onChange={(event) => updatePanel(editingPanel.id, { world_tag: event.target.value })} /></label>
               <label><span>限定世界 ID（逗号分隔）</span><input value={editingPanel.world_ids.join(', ')} placeholder="wrld_..." onChange={(event) => updatePanel(editingPanel.id, {
                 world_ids: event.target.value.split(',').map((value) => value.trim()).filter((value) => value.startsWith('wrld_')).slice(0, 50),

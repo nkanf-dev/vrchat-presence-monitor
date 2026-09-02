@@ -50,6 +50,7 @@ const dashboard: Dashboard = {
       platforms: [],
       world_ids: [],
       world_tag: '',
+      world_sort: 'people',
     }],
   },
 };

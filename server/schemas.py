@@ -70,6 +70,7 @@ class DashboardPanelRequest(StrictModel):
     platforms: list[str] = Field(default_factory=list, max_length=10)
     world_ids: list[str] = Field(default_factory=list, max_length=50)
     world_tag: str = Field(default="", max_length=160)
+    world_sort: Literal["people", "minutes", "visits", "recent"] = "people"
 
     @model_validator(mode="after")
     def validate_grid_bounds(self) -> "DashboardPanelRequest":

@@ -417,6 +417,7 @@ export const dashboardPanelSchema = z.object({
   platforms: z.array(z.string()).max(10).default([]),
   world_ids: z.array(z.string().startsWith('wrld_')).max(50).default([]),
   world_tag: z.string().max(160).default(''),
+  world_sort: z.enum(['people', 'minutes', 'visits', 'recent']).default('people'),
 }).refine((panel) => panel.x + panel.w <= 12, { message: 'panel exceeds grid' });
 
 export const dashboardDocumentSchema = z.object({

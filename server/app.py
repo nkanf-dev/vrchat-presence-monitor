@@ -235,6 +235,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             )
             world_ids = set(str(value) for value in panel.get("world_ids", []))
             items = [item for item in result["hot"] if not world_ids or item["world_id"] in world_ids]
+            world_sort = str(panel.get("world_sort") or "people")
+            sort_keys = {
+                "people": lambda item: (-int(item.get("unique_people") or 0), -int(item.get("visit_count") or 0), -float(item.get("minutes") or 0)),
+                "minutes": lambda item: (-float(item.get("minutes") or 0), -int(item.get("unique_people") or 0)),
+                "visits": lambda item: (-int(item.get("visit_count") or 0), -float(item.get("minutes") or 0)),
+                "recent": lambda item: str(item.get("last_observed") or ""),
+            }
+            items.sort(key=sort_keys[world_sort], reverse=world_sort == "recent")
             return {"kind": kind, "items": items[:limit]}
         if kind == "collection-coverage":
             today = datetime.now(timezone.utc).date()
