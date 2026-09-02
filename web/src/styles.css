@@ -51,7 +51,7 @@
 .dashboard-conflict>div { display:grid;gap:3px;margin-right:auto; }
 .dashboard-conflict span { color:var(--muted); }
 .dashboard-grid-host,.dashboard-grid-host>.react-grid-layout { width:100%;min-width:0;max-width:100%; }
-.dashboard-grid-host { min-height:160px;contain:inline-size; }
+.dashboard-grid-host { min-height:160px;overflow-x:clip;contain:inline-size; }
 .dashboard-grid-host .react-grid-placeholder { border:1px solid rgb(182 243 107 / 50%);border-radius:16px;background:rgb(182 243 107 / 10%);opacity:1; }
 .dashboard-grid-panel.panel { display:flex;min-width:0;min-height:0;flex-direction:column;overflow:hidden;border-radius:16px;box-shadow:0 12px 30px rgb(0 0 0 / 14%); }
 .dashboard-grid-host.is-editing .dashboard-grid-panel { border-color:rgb(104 124 148 / 72%); }
@@ -65,8 +65,8 @@
 .dashboard-panel-actions button:disabled { cursor:not-allowed;opacity:.35; }
 .dashboard-panel-actions .dashboard-panel-drag { cursor:grab;touch-action:none; }
 .dashboard-panel-actions .dashboard-panel-drag:active { cursor:grabbing; }
-.dashboard-panel-body { position:relative;display:flex;min-width:0;min-height:0;flex:1;flex-direction:column; }
-.dashboard-echart { width:100%;height:auto;min-height:130px;flex:1; }
+.dashboard-panel-body { position:relative;display:flex;min-width:0;max-width:100%;min-height:0;flex:1;flex-direction:column;overflow:hidden; }
+.dashboard-echart { width:100%;max-width:100%;height:auto;min-width:0;min-height:130px;flex:1 1 0;overflow:hidden; }
 .dashboard-panel-body>.chart-data-disclosure { flex:0 0 auto; }
 .dashboard-panel-body>.chart-data-disclosure[open] { max-height:55%;overflow:auto; }
 .dashboard-metric { display:grid;height:100%;min-height:100px;align-content:center;gap:4px;padding:8px 20px 18px; }
@@ -598,8 +598,11 @@ a {
 
 .product-shell {
   display: grid;
+  width: 100%;
+  max-width: 100%;
   min-height: 100dvh;
   grid-template-columns: 236px minmax(0, 1fr);
+  overflow-x: clip;
 }
 
 .sidebar {
@@ -737,7 +740,10 @@ a {
 }
 
 .workspace {
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
+  overflow-x: clip;
 }
 
 .topbar {
@@ -1024,8 +1030,11 @@ a {
 
 .main-content {
   width: min(1280px, 100%);
+  min-width: 0;
+  max-width: 100%;
   margin: 0 auto;
   padding: 30px clamp(20px, 3.3vw, 46px) 60px;
+  overflow-x: clip;
   outline: none;
 }
 
