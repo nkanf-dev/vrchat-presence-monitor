@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
-import { afterEach } from 'vitest';
+import { afterEach, vi } from 'vitest';
 
 afterEach(cleanup);
 
@@ -33,6 +33,11 @@ Object.defineProperty(window, 'localStorage', {
 Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
   value: memoryStorage,
+});
+
+Object.defineProperty(window, 'scrollTo', {
+  configurable: true,
+  value: vi.fn(),
 });
 
 class ResizeObserverStub {

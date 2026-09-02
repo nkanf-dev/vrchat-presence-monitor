@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -21,6 +22,30 @@ class AnnotationConflict(OrganizationConflict):
     def __init__(self, server: dict[str, Any]):
         super().__init__("annotation changed")
         self.server = server
+
+
+class DashboardConflict(OrganizationConflict):
+    def __init__(self, server: dict[str, Any]):
+        super().__init__("dashboard changed")
+        self.server = server
+
+
+def default_dashboard_document() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "title": "我的仪表盘",
+        "range_days": 7,
+        "refresh_seconds": 60,
+        "panels": [
+            {"id": "online-now", "kind": "online-now", "title": "当前在线", "x": 0, "y": 0, "w": 3, "h": 4, "range_days": 0, "limit": 10, "include_self": True},
+            {"id": "tracked-count", "kind": "tracked-count", "title": "追踪人数", "x": 3, "y": 0, "w": 3, "h": 4, "range_days": 0, "limit": 10, "include_self": True},
+            {"id": "status-breakdown", "kind": "status-breakdown", "title": "当前状态", "x": 6, "y": 0, "w": 6, "h": 7, "range_days": 0, "limit": 10, "include_self": True},
+            {"id": "online-ranking", "kind": "online-ranking", "title": "在线时长排行", "x": 0, "y": 4, "w": 6, "h": 8, "range_days": 0, "limit": 10, "include_self": True},
+            {"id": "daily-changes", "kind": "daily-changes", "title": "每日状态变化", "x": 6, "y": 7, "w": 6, "h": 5, "range_days": 0, "limit": 10, "include_self": True},
+            {"id": "friend-heatmap", "kind": "friend-heatmap", "title": "好友时段热力", "x": 0, "y": 12, "w": 12, "h": 9, "range_days": 0, "limit": 12, "include_self": True},
+            {"id": "world-ranking", "kind": "world-ranking", "title": "热门世界", "x": 0, "y": 21, "w": 12, "h": 7, "range_days": 30, "limit": 10, "include_self": True},
+        ],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,3 +349,65 @@ class OrganizationService:
                 (tenant_id, normalized, stamp),
             )
         return {"timezone": normalized, "updated_at": stamp}
+
+    @staticmethod
+    def _dashboard_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {
+                "revision": None,
+                "updated_at": "",
+                "document": default_dashboard_document(),
+            }
+        return {
+            "revision": str(row["revision"]),
+            "updated_at": str(row["updated_at"]),
+            "document": json.loads(str(row["document_json"])),
+        }
+
+    def get_dashboard(self, tenant_id: str) -> dict[str, Any]:
+        with self.store.lock, self.store.connection() as db:
+            self.store._require_tenant(db, tenant_id)
+            row = db.execute(
+                "SELECT document_json,revision,updated_at FROM dashboard_configs WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+            return self._dashboard_payload(row)
+
+    def put_dashboard(
+        self,
+        tenant_id: str,
+        document: dict[str, Any],
+        expected_revision: str | None,
+    ) -> dict[str, Any]:
+        encoded = json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if len(encoded.encode("utf-8")) > 64 * 1024:
+            raise ValueError("仪表盘配置过大")
+        stamp = now()
+        revision = secrets.token_urlsafe(18)
+        with self.store.lock, self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.store._require_tenant(db, tenant_id)
+            current = db.execute(
+                "SELECT document_json,revision,updated_at FROM dashboard_configs WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+            current_payload = self._dashboard_payload(current)
+            if current is not None and expected_revision != current_payload["revision"]:
+                raise DashboardConflict(current_payload)
+            if current is None and expected_revision is not None:
+                raise DashboardConflict(current_payload)
+            db.execute(
+                """INSERT INTO dashboard_configs(tenant_id,document_json,revision,updated_at)
+                VALUES(?,?,?,?) ON CONFLICT(tenant_id) DO UPDATE SET
+                document_json=excluded.document_json,
+                revision=excluded.revision,
+                updated_at=excluded.updated_at""",
+                (tenant_id, encoded, revision, stamp),
+            )
+        return {"revision": revision, "updated_at": stamp, "document": document}

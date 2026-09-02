@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 export const areas = ['online', 'people', 'analysis', 'more'] as const;
 export type Area = (typeof areas)[number];
 
-export const analysisSections = ['daily', 'relationships', 'worlds', 'discover'] as const;
+export const analysisSections = ['daily', 'relationships', 'worlds', 'discover', 'dashboard'] as const;
 export type AnalysisSection = (typeof analysisSections)[number];
 
 export const moreSections = ['history', 'data', 'settings'] as const;
@@ -16,6 +16,7 @@ export const views = [
   'relationships',
   'worlds',
   'discover',
+  'dashboard',
   'history',
   'data',
   'settings',
@@ -38,6 +39,7 @@ const legacyRoutes: Record<string, Route> = {
   overview: { area: 'online' },
   people: { area: 'people' },
   daily: { area: 'analysis', section: 'daily' },
+  dashboard: { area: 'analysis', section: 'dashboard' },
   worlds: { area: 'analysis', section: 'worlds' },
   history: { area: 'more', section: 'history' },
   data: { area: 'more', section: 'data' },

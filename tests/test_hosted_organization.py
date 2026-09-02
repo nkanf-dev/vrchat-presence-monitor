@@ -29,6 +29,7 @@ class HostedOrganizationTests(unittest.TestCase):
         self.client = TestClient(create_app(settings, self.store))
         self.addCleanup(self.client.close)
         created = self.store.bootstrap("Alice", "collector")
+        self.access_code = created["access_code"]
         self.tenant_id = created["tenant_id"]
         self.collector_id = created["collector_id"]
         self.assertEqual(
@@ -132,6 +133,61 @@ class HostedOrganizationTests(unittest.TestCase):
             json={"note": "不能看到", "pinned": False, "revision": None},
         )
         self.assertEqual(response.status_code, 404, response.text)
+
+    def test_dashboard_save_conflict_and_tenant_isolation(self):
+        initial = self.client.get("/v1/dashboard")
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertIsNone(initial.json()["revision"])
+        document = initial.json()["document"]
+        document["title"] = "Alice 的仪表盘"
+        saved = self.client.put(
+            "/v1/dashboard",
+            headers=self.mutation_headers(),
+            json={"revision": None, "document": document},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+
+        conflict = self.client.put(
+            "/v1/dashboard",
+            headers=self.mutation_headers(),
+            json={"revision": "stale", "document": {**document, "title": "旧草稿"}},
+        )
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()["server"]["document"]["title"], "Alice 的仪表盘")
+
+        other = self.store.bootstrap("Other", "collector")
+        self.assertEqual(
+            self.client.post(
+                "/v1/login",
+                headers=self.mutation_headers(),
+                json={"access_code": other["access_code"]},
+            ).status_code,
+            200,
+        )
+        other_dashboard = self.client.get("/v1/dashboard")
+        self.assertEqual(other_dashboard.status_code, 200, other_dashboard.text)
+        self.assertEqual(other_dashboard.json()["document"]["title"], "我的仪表盘")
+        self.assertIsNone(other_dashboard.json()["revision"])
+
+    def test_dashboard_rejects_invalid_grid_and_duplicate_ids(self):
+        document = self.client.get("/v1/dashboard").json()["document"]
+        document["panels"][0]["x"] = 11
+        document["panels"][0]["w"] = 3
+        invalid_grid = self.client.put(
+            "/v1/dashboard",
+            headers=self.mutation_headers(),
+            json={"revision": None, "document": document},
+        )
+        self.assertEqual(invalid_grid.status_code, 422, invalid_grid.text)
+
+        document = self.client.get("/v1/dashboard").json()["document"]
+        document["panels"][1]["id"] = document["panels"][0]["id"]
+        duplicate = self.client.put(
+            "/v1/dashboard",
+            headers=self.mutation_headers(),
+            json={"revision": None, "document": document},
+        )
+        self.assertEqual(duplicate.status_code, 422, duplicate.text)
 
 
 if __name__ == "__main__":

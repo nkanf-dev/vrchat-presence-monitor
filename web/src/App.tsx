@@ -1,6 +1,6 @@
 import { useIsFetching, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 
 import {
   ApiError,
@@ -31,6 +31,8 @@ import { PeopleView } from './views/PeopleView';
 import { DailyView } from './views/DailyView';
 import { DiscoveryView } from './views/DiscoveryView';
 import { WorldsView } from './views/WorldsView';
+
+const DashboardView = lazy(() => import('./views/DashboardView').then((module) => ({ default: module.DashboardView })));
 
 function InitialContentError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
@@ -91,6 +93,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
   const queryClient = useQueryClient();
   const {
     parameters,
+    update,
     openDetail,
     closeDetail,
     route,
@@ -152,6 +155,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       queryClient.invalidateQueries({ queryKey: ['analytics'] }),
       queryClient.invalidateQueries({ queryKey: ['world'] }),
       queryClient.invalidateQueries({ queryKey: ['capabilities'] }),
+      queryClient.invalidateQueries({ queryKey: ['dashboard-data'] }),
     ]);
   };
 
@@ -200,6 +204,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
     settings: '设置',
     relationships: '好友关系',
     discover: '世界发现',
+    dashboard: '自定义图表',
   }[view];
   const friendDetailId = parameters.get('personDetail');
   const worldDetailId = parameters.get('worldDetail');
@@ -280,6 +285,11 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
       {view === 'daily' && <DailyView />}
       {view === 'worlds' && <WorldsView />}
       {view === 'discover' && <DiscoveryView onOpenWorld={openWorld} />}
+      {view === 'dashboard' && (
+        <Suspense fallback={<div className="dashboard-workspace-loading" role="status">正在打开仪表盘…</div>}>
+          <DashboardView parameters={parameters} onUpdateParameters={update} />
+        </Suspense>
+      )}
       {view === 'people' && <PeopleView onOpenFriend={openFriend} />}
       {view === 'history' && <HistoryView />}
       {view === 'data' && <DataView />}

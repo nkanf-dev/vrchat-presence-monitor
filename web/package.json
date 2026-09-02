@@ -1,7 +1,7 @@
 {
   "name": "presence-monitor-web",
   "private": true,
-  "version": "0.3.0-beta.4",
+  "version": "0.3.0-beta.5",
   "type": "module",
   "engines": {
     "node": ">=20.19"
@@ -16,9 +16,11 @@
   "dependencies": {
     "@streamparser/json": "0.0.26",
     "@tanstack/react-query": "5.102.7",
+    "echarts": "6.1.0",
     "lucide-react": "1.34.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-grid-layout": "2.2.4",
     "zod": "4.4.3"
   },
   "devDependencies": {

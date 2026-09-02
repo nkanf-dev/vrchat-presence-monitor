@@ -278,6 +278,13 @@ class Store:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS dashboard_configs (
+                tenant_id TEXT PRIMARY KEY,
+                document_json TEXT NOT NULL CHECK(length(CAST(document_json AS BLOB)) BETWEEN 2 AND 65536),
+                revision TEXT NOT NULL CHECK(revision <> ''),
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS vrchat_accounts (
                 tenant_id TEXT PRIMARY KEY,
                 vrchat_user_id TEXT NOT NULL UNIQUE,

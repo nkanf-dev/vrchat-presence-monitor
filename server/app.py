@@ -38,6 +38,7 @@ from .health import TenantHealthService
 from .insights import InsightsService
 from .organization import (
     AnnotationConflict,
+    DashboardConflict,
     OrganizationConflict,
     OrganizationNotFound,
     OrganizationService,
@@ -46,6 +47,7 @@ from .search import SearchService
 from .schemas import (
     AnnotationRequest,
     BootstrapRequest,
+    DashboardPutRequest,
     LoginRequest,
     PreferenceRequest,
     TagRequest,
@@ -212,6 +214,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     async def annotation_conflict(_: Request, error: AnnotationConflict) -> JSONResponse:
         return JSONResponse(status_code=409, content={"server": error.server})
 
+    @app.exception_handler(DashboardConflict)
+    async def dashboard_conflict(_: Request, error: DashboardConflict) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"server": error.server})
+
     @app.exception_handler(OrganizationNotFound)
     async def organization_not_found(_: Request, __: OrganizationNotFound) -> JSONResponse:
         return JSONResponse(status_code=404, content={"error": "not found"})
@@ -233,7 +239,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: https://*.vrchat.cloud https://*.vrcdn.cloud; "
             "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; "
             "form-action 'self'; frame-ancestors 'none'"
@@ -839,6 +845,29 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             organization.put_preferences,
             auth.row["tenant_id"],
             payload.timezone,
+        )
+
+    @app.get("/v1/dashboard")
+    async def dashboard(
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            organization.get_dashboard,
+            auth.row["tenant_id"],
+        )
+
+    @app.put("/v1/dashboard")
+    async def update_dashboard(
+        request: Request,
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        payload = await _read_model(request, DashboardPutRequest, 64 * 1024)
+        return await organization_call(
+            organization.put_dashboard,
+            auth.row["tenant_id"],
+            payload.document.model_dump(mode="json"),
+            payload.revision,
         )
 
     @app.get("/v1/events")

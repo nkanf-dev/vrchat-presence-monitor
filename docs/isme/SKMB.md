@@ -15,6 +15,7 @@ and cites explicit approval evidence.
 | SKMB-2026-08-30-005 | accepted | browser navigation and recoverable UX | B,C,F | decisions/2026-08-30-005-browser-state.md | 68721f8 |
 | SKMB-2026-08-30-006 | accepted | release and production deployment | B,D,F,G | decisions/2026-08-30-006-release-deployment.md | 68721f8 |
 | SKMB-2026-08-30-007 | proposed | off-site backup egress | D,E,F | decisions/2026-08-30-007-offsite-backup-egress.md | 97417e9 |
+| SKMB-2026-09-03-012 | proposed | tenant custom dashboard state | B,C,E,F | decisions/2026-09-03-012-custom-dashboard-state.md | pending |
 
 ## Named States
 
@@ -29,6 +30,7 @@ and cites explicit approval evidence.
 | world_cached | Last successful world metadata is available | resolver | May be fresh or visibly stale | SKMB-2026-08-30-003 |
 | world_backoff | World resolution is delayed until its retry deadline | resolver | Cached metadata remains visible | SKMB-2026-08-30-003 |
 | note_conflict | Local note draft and a newer server revision both exist | browser | Neither value is silently discarded | SKMB-2026-08-30-005 |
+| dashboard_conflict | Local dashboard draft and a newer server revision both exist | browser | Both versions remain selectable until the user resolves the conflict | SKMB-2026-09-03-012 |
 
 ## Transition Decisions
 
@@ -63,12 +65,14 @@ and cites explicit approval evidence.
 | F-004 | Import validation or merge fails | Roll back the entire import and leave tenant data unchanged | SKMB-2026-08-30-004 |
 | F-005 | A dashboard panel refresh fails | Keep rendered data and isolate retry/error state to that panel | SKMB-2026-08-30-005 |
 | F-006 | Candidate deploy or migration fails | Retain/restore the prior immutable image and verified database without in-place destructive repair | SKMB-2026-08-30-006 |
+| F-012 | A dashboard panel refresh or dashboard save fails | Keep rendered panels and the local draft; isolate refresh errors and preserve the server revision for recovery | SKMB-2026-09-03-012 |
 
 ## Statistical Defaults Allowed Temporarily
 
 | id | scope | decision | approval source |
 | --- | --- | --- | --- |
 | SKMB-2026-08-30-007 | off-site backup egress | Explicit proxy only; HTTPS remains end-to-end; fail closed without direct fallback | Designer authorized unresolved best-practice progress with “通过，后续无需再审批” |
+| SKMB-2026-09-03-012 | custom dashboard persistence and interaction | One revisioned dashboard per tenant; explicit desktop edit mode; mobile-safe stacked layout; isolated panel failures | Designer requested a Grafana-like custom chart page and explicitly said “不用等我批准计划。用最先进最现代的方案” |
 
 ## Open Decisions
 

@@ -47,6 +47,7 @@ COUNT_TABLES = (
     "friend_identity_events",
     "event_anomalies",
     "tenant_preferences",
+    "dashboard_configs",
     "world_cache",
     "world_resolution_state",
 )

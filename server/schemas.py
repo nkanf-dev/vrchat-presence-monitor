@@ -44,6 +44,53 @@ class PreferenceRequest(StrictModel):
     timezone: str = Field(min_length=1, max_length=80)
 
 
+class DashboardPanelRequest(StrictModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    kind: Literal[
+        "online-now",
+        "tracked-count",
+        "status-breakdown",
+        "online-ranking",
+        "daily-changes",
+        "friend-heatmap",
+        "world-ranking",
+    ]
+    title: str = Field(default="", max_length=80)
+    x: int = Field(ge=0, le=11)
+    y: int = Field(ge=0, le=10_000)
+    w: int = Field(ge=1, le=12)
+    h: int = Field(ge=3, le=20)
+    range_days: Literal[0, 1, 7, 30, 90] = 0
+    limit: int = Field(default=10, ge=3, le=30)
+    include_self: bool = True
+
+    @model_validator(mode="after")
+    def validate_grid_bounds(self) -> "DashboardPanelRequest":
+        if self.x + self.w > 12:
+            raise ValueError("dashboard panel exceeds the 12-column grid")
+        return self
+
+
+class DashboardDocumentRequest(StrictModel):
+    schema_version: Literal[1] = 1
+    title: str = Field(default="我的仪表盘", min_length=1, max_length=80)
+    range_days: Literal[1, 7, 30, 90] = 7
+    refresh_seconds: Literal[0, 30, 60, 300] = 60
+    panels: list[DashboardPanelRequest] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_unique_panels(self) -> "DashboardDocumentRequest":
+        ids = [panel.id for panel in self.panels]
+        if len(ids) != len(set(ids)):
+            raise ValueError("dashboard panel ids must be unique")
+        return self
+
+
+class DashboardPutRequest(StrictModel):
+    revision: str | None = Field(default=None, max_length=256)
+    document: DashboardDocumentRequest
+
+
 class BootstrapRequest(StrictModel):
     tenant_name: str = Field(min_length=1, max_length=120)
     collector_name: str = Field(default="local bridge", min_length=1, max_length=120)

@@ -389,6 +389,43 @@ const preferenceSchema = z.object({
   updated_at: z.string(),
 });
 
+export const dashboardPanelKindSchema = z.enum([
+  'online-now',
+  'tracked-count',
+  'status-breakdown',
+  'online-ranking',
+  'daily-changes',
+  'friend-heatmap',
+  'world-ranking',
+]);
+
+export const dashboardPanelSchema = z.object({
+  id: z.string().min(1).max(64),
+  kind: dashboardPanelKindSchema,
+  title: z.string().max(80).default(''),
+  x: z.number().int().min(0).max(11),
+  y: z.number().int().min(0).max(10_000),
+  w: z.number().int().min(1).max(12),
+  h: z.number().int().min(3).max(20),
+  range_days: z.union([z.literal(0), z.literal(1), z.literal(7), z.literal(30), z.literal(90)]).default(0),
+  limit: z.number().int().min(3).max(30).default(10),
+  include_self: z.boolean().default(true),
+}).refine((panel) => panel.x + panel.w <= 12, { message: 'panel exceeds grid' });
+
+export const dashboardDocumentSchema = z.object({
+  schema_version: z.literal(1),
+  title: z.string().min(1).max(80),
+  range_days: z.union([z.literal(1), z.literal(7), z.literal(30), z.literal(90)]),
+  refresh_seconds: z.union([z.literal(0), z.literal(30), z.literal(60), z.literal(300)]),
+  panels: z.array(dashboardPanelSchema).max(20),
+});
+
+const dashboardSchema = z.object({
+  revision: z.string().nullable(),
+  updated_at: z.string(),
+  document: dashboardDocumentSchema,
+});
+
 const worldLibraryItemSchema = worldInfoSchema.extend({
   last_observed: z.string(),
   event_count: z.number().int().nonnegative(),
@@ -494,6 +531,10 @@ export type Annotation = z.infer<typeof annotationSchema>;
 export type FriendInsight = z.infer<typeof friendInsightSchema>;
 export type SearchResults = z.infer<typeof searchSchema>;
 export type Preference = z.infer<typeof preferenceSchema>;
+export type DashboardPanelKind = z.infer<typeof dashboardPanelKindSchema>;
+export type DashboardPanel = z.infer<typeof dashboardPanelSchema>;
+export type DashboardDocument = z.infer<typeof dashboardDocumentSchema>;
+export type Dashboard = z.infer<typeof dashboardSchema>;
 export type WorldLibraryItem = z.infer<typeof worldLibraryItemSchema>;
 export type WorldLibrary = z.infer<typeof worldLibrarySchema>;
 export type DiscoveryWorld = z.infer<typeof discoveryWorldSchema>;
@@ -843,6 +884,14 @@ export const updatePreferences = (timezone: string) =>
   request('/v1/preferences', preferenceSchema, {
     method: 'PUT',
     body: JSON.stringify({ timezone }),
+  });
+
+export const getDashboard = () => request('/v1/dashboard', dashboardSchema);
+
+export const updateDashboard = (value: Pick<Dashboard, 'revision' | 'document'>) =>
+  request('/v1/dashboard', dashboardSchema, {
+    method: 'PUT',
+    body: JSON.stringify(value),
   });
 
 export const getWorldLibrary = (options: {
