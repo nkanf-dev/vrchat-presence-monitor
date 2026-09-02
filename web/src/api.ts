@@ -409,7 +409,7 @@ export const dashboardPanelSchema = z.object({
   y: z.number().int().min(0).max(10_000),
   w: z.number().int().min(1).max(12),
   h: z.number().int().min(3).max(20),
-  range_days: z.union([z.literal(0), z.literal(1), z.literal(7), z.literal(30), z.literal(90)]).default(0),
+  range_days: z.number().int().min(0).max(730).default(0),
   limit: z.number().int().min(3).max(30).default(10),
   include_self: z.boolean().default(true),
   friend_ids: z.array(z.string().startsWith('usr_')).max(50).default([]),
@@ -422,7 +422,7 @@ export const dashboardPanelSchema = z.object({
 export const dashboardDocumentSchema = z.object({
   schema_version: z.literal(1),
   title: z.string().min(1).max(80),
-  range_days: z.union([z.literal(1), z.literal(7), z.literal(30), z.literal(90)]),
+  range_days: z.number().int().min(1).max(730),
   refresh_seconds: z.union([z.literal(0), z.literal(30), z.literal(60), z.literal(300)]),
   panels: z.array(dashboardPanelSchema).max(20),
 });

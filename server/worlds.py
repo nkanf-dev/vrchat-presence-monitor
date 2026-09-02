@@ -1170,9 +1170,12 @@ class DiscoveryService:
         include_self: bool = True,
         limit: int = 30,
         offset: int = 0,
+        allow_custom_range: bool = False,
     ) -> dict[str, Any]:
         selected_days = int(days)
-        if selected_days not in self.ALLOWED_DAYS:
+        if selected_days < 0 or selected_days > 730 or (
+            not allow_custom_range and selected_days not in self.ALLOWED_DAYS
+        ):
             raise ValueError("范围仅支持 1 天、7 天、30 天或全部")
         page_size = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))

@@ -70,8 +70,17 @@ const cloneDocument = (document: DashboardDocument): DashboardDocument =>
 
 const validRange = (value: string | null): DashboardDocument['range_days'] | null => {
   const parsed = Number(value);
-  return parsed === 1 || parsed === 7 || parsed === 30 || parsed === 90 ? parsed : null;
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 730 ? parsed : null;
 };
+
+const samplePanels = (): DashboardPanelModel[] => [
+  { id: 'online-now', kind: 'online-now', title: '当前在线', x: 0, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
+  { id: 'tracked-count', kind: 'tracked-count', title: '追踪人数', x: 3, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
+  { id: 'status-breakdown', kind: 'status-breakdown', title: '当前状态', x: 6, y: 0, w: 6, h: 7, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
+  { id: 'online-ranking', kind: 'online-ranking', title: '在线时长排行', x: 0, y: 4, w: 6, h: 8, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
+  { id: 'daily-changes', kind: 'daily-changes', title: '每日状态变化', x: 6, y: 7, w: 6, h: 5, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
+  { id: 'friend-heatmap', kind: 'friend-heatmap', title: '好友时段热力', x: 0, y: 12, w: 12, h: 9, range_days: 0, limit: 12, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '' },
+];
 
 const validRefresh = (value: string | null): DashboardDocument['refresh_seconds'] | null => {
   if (value === null) return null;
@@ -122,7 +131,7 @@ export function DashboardView({
   onUpdateParameters: (values: HashPatch, replace?: boolean) => void;
 }) {
   const queryClient = useQueryClient();
-  const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true });
+  const { width, containerRef, mounted } = useContainerWidth();
   const mobile = mounted && width < 720;
   const config = useQuery({
     queryKey: ['dashboard-config'],
@@ -133,6 +142,7 @@ export function DashboardView({
   const [revision, setRevision] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [customRangeOpen, setCustomRangeOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [editingPanelId, setEditingPanelId] = useState<string | null>(null);
@@ -166,6 +176,10 @@ export function DashboardView({
     }
     next.range_days = validRange(parameters.get('dashRange')) ?? next.range_days;
     next.refresh_seconds = validRefresh(parameters.get('dashRefresh')) ?? next.refresh_seconds;
+    if (!next.panels.length) {
+      next.panels = samplePanels();
+      setDirty(true);
+    }
     setDocument(next);
     setRevision(config.data.revision);
     loadedRevision.current = config.data.revision;
@@ -383,11 +397,13 @@ export function DashboardView({
       <section className="dashboard-toolbar panel" aria-label="仪表盘工具栏">
         <div className="dashboard-range" role="group" aria-label="全局时间范围">
           {rangeOptions.map((range) => (
-            <button key={range} type="button" className={document.range_days === range ? 'active' : ''} onClick={() => updateRange(range)}>
+            <button key={range} type="button" className={!customRangeOpen && document.range_days === range ? 'active' : ''} onClick={() => { setCustomRangeOpen(false); updateRange(range); }}>
               {range === 1 ? '1 天' : `${range} 天`}
             </button>
           ))}
+          <button type="button" className={customRangeOpen || !rangeOptions.includes(document.range_days as (typeof rangeOptions)[number]) ? 'active' : ''} onClick={() => setCustomRangeOpen(true)}>自定义</button>
         </div>
+        {customRangeOpen && <label className="dashboard-custom-range"><input type="number" min={1} max={730} value={document.range_days} aria-label="自定义天数" onChange={(event) => updateRange(Math.max(1, Math.min(730, Number(event.target.value) || 1)))} /><span>天</span></label>}
         <label className="dashboard-refresh-select">
           <RefreshCw size={15} aria-hidden="true" />
           <span className="sr-only">自动刷新</span>

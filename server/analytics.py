@@ -352,7 +352,7 @@ class AnalyticsService:
         return grouped
 
     def stats(self, tenant_id: str, days: int = 30) -> dict[str, Any]:
-        days = max(1, min(int(days), 90))
+        days = max(1, min(int(days), 730))
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
         friends, events, evidence, _ = self._snapshot(tenant_id, start, end)

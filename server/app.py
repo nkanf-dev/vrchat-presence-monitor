@@ -221,7 +221,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             rows.sort(key=lambda row: -sum(float(cell.get("online_minutes") or 0) for cell in row["cells"]))
             return {"kind": kind, "rows": rows[:limit]}
         if kind == "world-ranking":
-            discovery_days = range_days if range_days in {1, 7, 30} else 30
+            discovery_days = max(1, min(range_days, 730))
             selected_friend = friend_ids[0] if len(friend_ids) == 1 else ""
             result = discovery.discover(
                 tenant_id,
@@ -231,6 +231,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 include_self=include_self,
                 limit=max(limit, 30),
                 offset=0,
+                allow_custom_range=True,
             )
             world_ids = set(str(value) for value in panel.get("world_ids", []))
             items = [item for item in result["hot"] if not world_ids or item["world_id"] in world_ids]

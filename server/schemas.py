@@ -62,7 +62,7 @@ class DashboardPanelRequest(StrictModel):
     y: int = Field(ge=0, le=10_000)
     w: int = Field(ge=1, le=12)
     h: int = Field(ge=3, le=20)
-    range_days: Literal[0, 1, 7, 30, 90] = 0
+    range_days: int = Field(default=0, ge=0, le=730)
     limit: int = Field(default=10, ge=3, le=30)
     include_self: bool = True
     friend_ids: list[str] = Field(default_factory=list, max_length=50)
@@ -85,7 +85,7 @@ class DashboardPanelRequest(StrictModel):
 class DashboardDocumentRequest(StrictModel):
     schema_version: Literal[1] = 1
     title: str = Field(default="我的仪表盘", min_length=1, max_length=80)
-    range_days: Literal[1, 7, 30, 90] = 7
+    range_days: int = Field(default=7, ge=1, le=730)
     refresh_seconds: Literal[0, 30, 60, 300] = 60
     panels: list[DashboardPanelRequest] = Field(default_factory=list, max_length=20)
 
@@ -104,7 +104,7 @@ class DashboardPutRequest(StrictModel):
 
 class DashboardQueryRequest(StrictModel):
     panel: DashboardPanelRequest
-    global_range_days: Literal[1, 7, 30, 90] = 7
+    global_range_days: int = Field(default=7, ge=1, le=730)
 
 
 class DashboardSharePutRequest(StrictModel):
