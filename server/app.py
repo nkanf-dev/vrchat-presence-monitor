@@ -199,26 +199,43 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         platforms = [str(value) for value in panel.get("platforms", [])]
         include_self = bool(panel.get("include_self", True))
         limit = int(panel.get("limit") or 10)
+        sort_direction = str(panel.get("sort_direction") or "auto")
         if kind in {"online-now", "tracked-count", "status-breakdown", "platform-breakdown"}:
+            current_statuses = statuses
+            if kind == "platform-breakdown" and not current_statuses:
+                current_statuses = ["active", "join me", "ask me", "busy"]
             current = database.dashboard_current(
                 tenant_id,
                 friend_ids=friend_ids,
-                statuses=statuses,
+                statuses=current_statuses,
                 platforms=platforms,
                 include_self=include_self,
             )
             if kind in {"online-now", "tracked-count"}:
                 value = current["online_count"] if kind == "online-now" else current["tracked_count"]
                 detail = f"{current['tracked_count']} 位筛选对象" if kind == "online-now" else f"{current['online_count']} 位当前在线"
-                return {"kind": kind, "value": value, "detail": detail}
+                ratio = current["online_count"] / current["tracked_count"] if current["tracked_count"] else 0.0
+                return {"kind": kind, "value": value, "detail": detail, "ratio": ratio}
             counts = current["status_counts"] if kind == "status-breakdown" else current["platform_counts"]
-            return {"kind": kind, "items": [{"name": name, "value": value} for name, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]}
+            items = [{"name": name, "value": value} for name, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+            if sort_direction == "asc":
+                items.reverse()
+            return {"kind": kind, "items": items}
         if kind in {"online-ranking", "daily-changes"}:
             result = analytics.stats(tenant_id, range_days)
             if kind == "daily-changes":
-                return {"kind": kind, "items": result["daily_changes"]}
+                items = list(result["daily_changes"])
+                if sort_direction == "desc":
+                    items.reverse()
+                return {"kind": kind, "items": items}
             allowed = set(friend_ids)
-            items = [item for item in result["online_hours_all"] if not allowed or item["id"] in allowed]
+            items = [
+                item for item in result["online_hours_all"]
+                if (include_self or not item.get("is_self"))
+                and (not allowed or item["id"] in allowed)
+            ]
+            if sort_direction == "asc":
+                items.sort(key=lambda item: (float(item.get("seconds") or 0), str(item.get("name") or "")))
             return {"kind": kind, "items": items[:limit]}
         if kind == "friend-heatmap":
             today = datetime.now(timezone.utc).date()
@@ -232,31 +249,26 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 if (include_self or not row["is_self"]) and (not allowed or row["id"] in allowed)
             ]
             rows.sort(key=lambda row: -sum(float(cell.get("online_minutes") or 0) for cell in row["cells"]))
+            if sort_direction == "asc":
+                rows.reverse()
             return {"kind": kind, "rows": rows[:limit]}
         if kind == "world-ranking":
             discovery_days = max(1, min(range_days, 730))
-            selected_friend = friend_ids[0] if len(friend_ids) == 1 else ""
+            world_sort = str(panel.get("world_sort") or "people")
             result = discovery.discover(
                 tenant_id,
                 discovery_days,
-                friend_id=selected_friend,
+                friend_ids=friend_ids,
                 world_tag=str(panel.get("world_tag") or ""),
+                world_ids=[str(value) for value in panel.get("world_ids", [])],
+                hot_sort=world_sort,
+                sort_direction="asc" if sort_direction == "asc" else "desc",
                 include_self=include_self,
-                limit=max(limit, 30),
+                limit=limit,
                 offset=0,
                 allow_custom_range=True,
             )
-            world_ids = set(str(value) for value in panel.get("world_ids", []))
-            items = [item for item in result["hot"] if not world_ids or item["world_id"] in world_ids]
-            world_sort = str(panel.get("world_sort") or "people")
-            sort_keys = {
-                "people": lambda item: (-int(item.get("unique_people") or 0), -int(item.get("visit_count") or 0), -float(item.get("minutes") or 0)),
-                "minutes": lambda item: (-float(item.get("minutes") or 0), -int(item.get("unique_people") or 0)),
-                "visits": lambda item: (-int(item.get("visit_count") or 0), -float(item.get("minutes") or 0)),
-                "recent": lambda item: str(item.get("last_observed") or ""),
-            }
-            items.sort(key=sort_keys[world_sort], reverse=world_sort == "recent")
-            return {"kind": kind, "items": items[:limit]}
+            return {"kind": kind, "items": result["hot"]}
         if kind == "collection-coverage":
             today = datetime.now(timezone.utc).date()
             start = today - timedelta(days=max(0, range_days - 1))
@@ -284,7 +296,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     app = FastAPI(
         title="Presence Monitor Hosted API",
-        version="0.3.0-beta.6",
+        version="0.3.0-beta.7",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -1002,9 +1014,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         auth: Authenticated = Depends(viewer),
     ) -> dict[str, Any]:
         require_same_origin(request)
-        payload = await _read_model(request, DashboardSharePutRequest, 2048)
+        payload = await _read_model(request, DashboardSharePutRequest, 16 * 1024)
         return await organization_call(
-            organization.publish_dashboard_share, auth.row["tenant_id"], payload.password
+            organization.publish_dashboard_share,
+            auth.row["tenant_id"],
+            payload.password,
+            payload.appearance.model_dump(mode="json"),
         )
 
     @app.delete("/v1/dashboard/share")
@@ -1058,7 +1073,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 )
             except (KeyError, ValueError):
                 data[str(panel.get("id") or "")] = {"kind": str(panel.get("kind") or ""), "error": "这张图表暂时无法载入"}
-        return {**shared, "data": data}
+            except Exception:
+                LOGGER.exception("public dashboard panel query failed")
+                data[str(panel.get("id") or "")] = {"kind": str(panel.get("kind") or ""), "error": "这张图表暂时无法载入"}
+        public_document = {
+            **document,
+            "panels": [
+                {
+                    key: value for key, value in panel.items()
+                    if key not in {"friend_ids", "statuses", "platforms", "world_ids", "world_tag"}
+                }
+                for panel in document.get("panels", [])
+            ],
+        }
+        return {**shared, "document": public_document, "data": data}
 
     @app.post("/v1/public/dashboard/{share_id}/unlock")
     async def unlock_public_dashboard(

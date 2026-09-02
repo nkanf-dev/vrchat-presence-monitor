@@ -384,6 +384,7 @@ class AnalyticsService:
                 {
                     "id": str(friend["id"]),
                     "name": str(friend["display_name"]),
+                    "is_self": is_self,
                     "seconds": round(seconds),
                     "hours": round(seconds / 3600, 1),
                 }

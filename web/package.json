@@ -1,7 +1,7 @@
 {
   "name": "presence-monitor-web",
   "private": true,
-  "version": "0.3.0-beta.6",
+  "version": "0.3.0-beta.7",
   "type": "module",
   "engines": {
     "node": ">=20.19"

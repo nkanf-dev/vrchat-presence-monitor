@@ -72,12 +72,16 @@ export function AccountMenu({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        {Array.from(identity.name)[0] ?? 'P'}
+        {identity.avatar_url
+          ? <img src={identity.avatar_url} alt="" referrerPolicy="no-referrer" />
+          : Array.from(identity.name)[0] ?? 'P'}
       </button>
       {open && (
         <div className="account-menu" role="menu">
           <header>
-            <span className="account-menu-avatar"><UserRound size={20} aria-hidden="true" /></span>
+            <span className="account-menu-avatar">{identity.avatar_url
+              ? <img src={identity.avatar_url} alt="" referrerPolicy="no-referrer" />
+              : <UserRound size={20} aria-hidden="true" />}</span>
             <div>
               <strong>{identity.name}</strong>
               <span>{connected ? '云端持续采集中' : '你的 Presence Monitor 空间'}</span>

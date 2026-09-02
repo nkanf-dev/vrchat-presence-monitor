@@ -6,6 +6,7 @@ import {
   ApiError,
   AUTH_REQUIRED_EVENT,
   type Friend,
+  type Identity,
   disconnectVrchat,
   getEvents,
   getFriends,
@@ -90,7 +91,7 @@ function SettingsView() {
   );
 }
 
-function Dashboard({ identity }: { identity: { tenant_id: string; name: string } }) {
+function Dashboard({ identity }: { identity: Identity }) {
   const queryClient = useQueryClient();
   const {
     parameters,

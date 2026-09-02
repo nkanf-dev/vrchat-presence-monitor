@@ -72,7 +72,7 @@ class HostedIsolationTests(unittest.TestCase):
 
             identity = store.viewer_identity(session["session_token"])
 
-            self.assertEqual(identity, {"tenant_id": bootstrapped["tenant_id"], "name": "Alice 的监控"})
+            self.assertEqual(identity, {"tenant_id": bootstrapped["tenant_id"], "name": "Alice 的监控", "avatar_url": ""})
 
     def test_tenants_cannot_read_each_other(self):
         with tempfile.TemporaryDirectory() as directory:

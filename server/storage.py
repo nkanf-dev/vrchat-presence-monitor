@@ -298,6 +298,7 @@ class Store:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 revoked_at TEXT,
+                appearance_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS dashboard_share_sessions (
@@ -399,6 +400,13 @@ class Store:
                 db.execute(
                     "UPDATE vrchat_accounts SET credential_updated_at=updated_at "
                     "WHERE credential_updated_at IS NULL"
+                )
+            share_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(dashboard_shares)").fetchall()
+            }
+            if "appearance_json" not in share_columns:
+                db.execute(
+                    "ALTER TABLE dashboard_shares ADD COLUMN appearance_json TEXT NOT NULL DEFAULT '{}'"
                 )
             db.execute("DROP INDEX IF EXISTS idx_hosted_events_previous_id")
             db.execute(
@@ -1153,12 +1161,21 @@ class Store:
     def viewer_identity(self, raw_token: str) -> dict[str, str] | None:
         with self.lock, self.connection() as db:
             row = db.execute(
-                """SELECT t.id AS tenant_id, t.name FROM viewer_tokens v
+                """SELECT t.id AS tenant_id, t.name,
+                COALESCE((
+                    SELECT CASE WHEN f.avatar_image_url <> '' THEN f.avatar_image_url ELSE f.avatar_url END
+                    FROM friends f WHERE f.tenant_id=t.id AND f.is_self=1 LIMIT 1
+                ), '') AS avatar_url
+                FROM viewer_tokens v
                 JOIN tenants t ON t.id=v.tenant_id
                 WHERE v.token_hash=? AND v.revoked_at IS NULL AND (v.expires_at IS NULL OR v.expires_at > ?)""",
                 (token_hash(raw_token), now()),
             ).fetchone()
-            return {"tenant_id": str(row["tenant_id"]), "name": str(row["name"])} if row else None
+            return {
+                "tenant_id": str(row["tenant_id"]),
+                "name": str(row["name"]),
+                "avatar_url": str(row["avatar_url"]),
+            } if row else None
 
     def revoke_viewer(self, raw_token: str) -> bool:
         with self.lock, self.connection() as db:

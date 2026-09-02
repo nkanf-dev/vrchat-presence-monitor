@@ -3,6 +3,7 @@ import { z } from 'zod';
 const identitySchema = z.object({
   tenant_id: z.string(),
   name: z.string(),
+  avatar_url: z.string().default(''),
 });
 
 const meSchema = z.object({
@@ -418,6 +419,11 @@ export const dashboardPanelSchema = z.object({
   world_ids: z.array(z.string().startsWith('wrld_')).max(50).default([]),
   world_tag: z.string().max(160).default(''),
   world_sort: z.enum(['people', 'minutes', 'visits', 'recent']).default('people'),
+  view: z.enum(['auto', 'number', 'progress', 'donut', 'bar', 'line', 'area', 'heatmap', 'table']).default('auto'),
+  sort_direction: z.enum(['auto', 'asc', 'desc']).default('auto'),
+  show_legend: z.boolean().default(true),
+  show_table: z.boolean().default(true),
+  metric: z.enum(['auto', 'count', 'percent', 'hours', 'hours_per_day', 'changes', 'ratio', 'online_minutes', 'people', 'minutes', 'visits']).default('auto'),
 }).refine((panel) => panel.x + panel.w <= 12, { message: 'panel exceeds grid' });
 
 export const dashboardDocumentSchema = z.object({
@@ -428,7 +434,7 @@ export const dashboardDocumentSchema = z.object({
   panels: z.array(dashboardPanelSchema).max(20),
 });
 
-const dashboardSchema = z.object({
+export const dashboardSchema = z.object({
   revision: z.string().nullable(),
   updated_at: z.string(),
   document: dashboardDocumentSchema,
@@ -446,6 +452,24 @@ export const dashboardPanelDataSchema = z.object({
   rows: z.array(z.record(z.string(), z.unknown())).optional(),
 }).passthrough();
 
+const defaultDashboardShareAppearance = {
+  preset: 'midnight' as const,
+  heading: '',
+  description: '',
+  page_title: '',
+  avatar_url: '',
+  custom_css: '',
+};
+
+export const dashboardShareAppearanceSchema = z.object({
+  preset: z.enum(['midnight', 'aurora', 'paper', 'sunset']).default('midnight'),
+  heading: z.string().max(120).default(''),
+  description: z.string().max(500).default(''),
+  page_title: z.string().max(120).default(''),
+  avatar_url: z.string().max(2048).default(''),
+  custom_css: z.string().max(12_000).default(''),
+});
+
 const dashboardShareSchema = z.object({
   enabled: z.boolean(),
   id: z.string().optional(),
@@ -456,6 +480,7 @@ const dashboardShareSchema = z.object({
   updated_at: z.string().optional(),
   access_total: z.number().int().nonnegative().optional(),
   last_access: z.string().nullable().optional(),
+  appearance: dashboardShareAppearanceSchema.default(defaultDashboardShareAppearance),
 });
 
 const dashboardShareAuditSchema = z.object({
@@ -473,7 +498,7 @@ const dashboardShareAuditSchema = z.object({
 });
 
 const publicDashboardSchema = z.union([
-  z.object({ locked: z.literal(true), title: z.string(), protected: z.boolean() }),
+  z.object({ locked: z.literal(true), title: z.string(), protected: z.boolean(), appearance: dashboardShareAppearanceSchema.default(defaultDashboardShareAppearance) }),
   z.object({
     locked: z.literal(false),
     id: z.string(),
@@ -481,6 +506,7 @@ const publicDashboardSchema = z.union([
     published_at: z.string(),
     document: dashboardDocumentSchema,
     data: z.record(z.string(), dashboardPanelDataSchema),
+    appearance: dashboardShareAppearanceSchema.default(defaultDashboardShareAppearance),
   }),
 ]);
 
@@ -595,6 +621,7 @@ export type DashboardDocument = z.infer<typeof dashboardDocumentSchema>;
 export type Dashboard = z.infer<typeof dashboardSchema>;
 export type DashboardPanelData = z.infer<typeof dashboardPanelDataSchema>;
 export type DashboardShare = z.infer<typeof dashboardShareSchema>;
+export type DashboardShareAppearance = z.infer<typeof dashboardShareAppearanceSchema>;
 export type DashboardShareAudit = z.infer<typeof dashboardShareAuditSchema>;
 export type PublicDashboard = z.infer<typeof publicDashboardSchema>;
 export type WorldLibraryItem = z.infer<typeof worldLibraryItemSchema>;
@@ -964,10 +991,10 @@ export const getDashboardPanelData = (panel: DashboardPanel, globalRangeDays: Da
 
 export const getDashboardShare = () => request('/v1/dashboard/share', dashboardShareSchema);
 
-export const publishDashboardShare = (password: string) =>
+export const publishDashboardShare = (password: string, appearance: DashboardShareAppearance) =>
   request('/v1/dashboard/share', dashboardShareSchema, {
     method: 'PUT',
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ password, appearance }),
   });
 
 export const revokeDashboardShare = () =>

@@ -14,6 +14,27 @@ from .storage import Store, now
 
 
 SHARE_SESSION_HOURS = 24
+SHARE_APPEARANCE_DEFAULTS: dict[str, str] = {
+    "preset": "midnight",
+    "heading": "",
+    "description": "",
+    "page_title": "",
+    "avatar_url": "",
+    "custom_css": "",
+}
+DASHBOARD_PANEL_DEFAULTS: dict[str, Any] = {
+    "friend_ids": [],
+    "statuses": [],
+    "platforms": [],
+    "world_ids": [],
+    "world_tag": "",
+    "world_sort": "people",
+    "view": "auto",
+    "sort_direction": "auto",
+    "show_legend": True,
+    "show_table": True,
+    "metric": "auto",
+}
 
 
 def _share_password(password: str, salt_hex: str) -> str:
@@ -30,6 +51,34 @@ def _share_password(password: str, salt_hex: str) -> str:
 
 def _share_fingerprint(audit_salt: str, address: str) -> str:
     return hmac.new(bytes.fromhex(audit_salt), address.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+
+
+def _share_appearance(value: object) -> dict[str, str]:
+    source = value if isinstance(value, dict) else {}
+    appearance = {
+        key: str(source.get(key) or default)
+        for key, default in SHARE_APPEARANCE_DEFAULTS.items()
+    }
+    if appearance["preset"] not in {"midnight", "aurora", "paper", "sunset"}:
+        appearance["preset"] = "midnight"
+    css = appearance["custom_css"]
+    lowered = css.casefold().replace(" ", "")
+    if any(token in lowered for token in ("@import", "url(", "expression(", "javascript:", "-moz-binding")):
+        raise ValueError("自定义 CSS 不能载入外部资源")
+    return appearance
+
+
+def _normalize_dashboard_document(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return default_dashboard_document()
+    document = dict(value)
+    panels = value.get("panels")
+    document["panels"] = [
+        {**DASHBOARD_PANEL_DEFAULTS, **panel}
+        for panel in panels
+        if isinstance(panel, dict)
+    ] if isinstance(panels, list) else []
+    return document
 
 
 class OrganizationNotFound(KeyError):
@@ -378,12 +427,16 @@ class OrganizationService:
             return {
                 "revision": None,
                 "updated_at": "",
-                "document": default_dashboard_document(),
+                "document": _normalize_dashboard_document(
+                    default_dashboard_document()
+                ),
             }
         return {
             "revision": str(row["revision"]),
             "updated_at": str(row["updated_at"]),
-            "document": json.loads(str(row["document_json"])),
+            "document": _normalize_dashboard_document(
+                json.loads(str(row["document_json"]))
+            ),
         }
 
     def get_dashboard(self, tenant_id: str) -> dict[str, Any]:
@@ -435,9 +488,18 @@ class OrganizationService:
         return {"revision": revision, "updated_at": stamp, "document": document}
 
     @staticmethod
-    def _share_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+    def _share_payload(
+        row: sqlite3.Row | None, fallback_appearance: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         if row is None or row["revoked_at"] is not None:
-            return {"enabled": False}
+            return {
+                "enabled": False,
+                "appearance": _share_appearance(fallback_appearance or {}),
+            }
+        try:
+            appearance = _share_appearance(json.loads(str(row["appearance_json"])))
+        except (TypeError, json.JSONDecodeError, ValueError):
+            appearance = _share_appearance(fallback_appearance or {})
         return {
             "enabled": True,
             "id": str(row["id"]),
@@ -446,15 +508,25 @@ class OrganizationService:
             "source_revision": str(row["source_revision"]),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
+            "appearance": appearance,
         }
 
     def get_dashboard_share(self, tenant_id: str) -> dict[str, Any]:
         with self.store.lock, self.store.connection() as db:
             self.store._require_tenant(db, tenant_id)
+            avatar = db.execute(
+                """SELECT CASE WHEN avatar_image_url <> '' THEN avatar_image_url ELSE avatar_url END
+                FROM friends WHERE tenant_id=? AND is_self=1 LIMIT 1""",
+                (tenant_id,),
+            ).fetchone()
+            fallback = {
+                **SHARE_APPEARANCE_DEFAULTS,
+                "avatar_url": str(avatar[0]) if avatar and avatar[0] else "",
+            }
             row = db.execute(
                 "SELECT * FROM dashboard_shares WHERE tenant_id=?", (tenant_id,)
             ).fetchone()
-            payload = self._share_payload(row)
+            payload = self._share_payload(row, fallback)
             if payload["enabled"]:
                 payload["access_total"] = int(db.execute(
                     "SELECT COUNT(*) FROM dashboard_share_audit WHERE tenant_id=? AND event_type='view' AND outcome='success'",
@@ -468,9 +540,13 @@ class OrganizationService:
             return payload
 
     def publish_dashboard_share(
-        self, tenant_id: str, password: str
+        self, tenant_id: str, password: str, appearance: dict[str, Any]
     ) -> dict[str, Any]:
         normalized_password = str(password or "")
+        normalized_appearance = _share_appearance(appearance)
+        appearance_json = json.dumps(
+            normalized_appearance, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
         stamp = now()
         with self.store.lock, self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -494,17 +570,17 @@ class OrganizationService:
             db.execute(
                 """INSERT INTO dashboard_shares(
                     id,tenant_id,title,snapshot_json,source_revision,password_salt,password_hash,
-                    audit_salt,auth_version,created_at,updated_at,revoked_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL)
+                    audit_salt,auth_version,created_at,updated_at,revoked_at,appearance_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?)
                 ON CONFLICT(tenant_id) DO UPDATE SET
                     title=excluded.title,snapshot_json=excluded.snapshot_json,
                     source_revision=excluded.source_revision,password_salt=excluded.password_salt,
                     password_hash=excluded.password_hash,auth_version=excluded.auth_version,
-                    updated_at=excluded.updated_at,revoked_at=NULL""",
+                    updated_at=excluded.updated_at,revoked_at=NULL,appearance_json=excluded.appearance_json""",
                 (
                     share_id, tenant_id, str(document.get("title") or "共享仪表盘"), encoded,
                     str(dashboard.get("revision") or ""), password_salt, password_hash,
-                    audit_salt, auth_version, created_at, stamp,
+                    audit_salt, auth_version, created_at, stamp, appearance_json,
                 ),
             )
             db.execute("DELETE FROM dashboard_share_sessions WHERE share_id=?", (share_id,))
@@ -556,13 +632,26 @@ class OrganizationService:
         address: str,
         device_class: str,
     ) -> None:
+        occurred_at = now()
+        visitor_hash = _share_fingerprint(str(row["audit_salt"]), address)
+        if event_type == "view" and outcome == "success":
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=30)
+            ).isoformat(timespec="microseconds")
+            if db.execute(
+                """SELECT 1 FROM dashboard_share_audit
+                WHERE share_id=? AND event_type='view' AND outcome='success'
+                  AND visitor_hash=? AND occurred_at>=? LIMIT 1""",
+                (str(row["id"]), visitor_hash, cutoff),
+            ).fetchone():
+                return
         db.execute(
             """INSERT INTO dashboard_share_audit(
                 tenant_id,share_id,occurred_at,event_type,outcome,visitor_hash,device_class
             ) VALUES(?,?,?,?,?,?,?)""",
             (
-                str(row["tenant_id"]), str(row["id"]), now(), event_type, outcome,
-                _share_fingerprint(str(row["audit_salt"]), address), device_class,
+                str(row["tenant_id"]), str(row["id"]), occurred_at, event_type, outcome,
+                visitor_hash, device_class,
             ),
         )
 
@@ -585,7 +674,12 @@ class OrganizationService:
                 ).fetchone()
                 granted = session is not None
             if not granted:
-                return {"locked": True, "title": str(row["title"]), "protected": True}
+                return {
+                    "locked": True,
+                    "title": str(row["title"]),
+                    "protected": True,
+                    "appearance": _share_appearance(json.loads(str(row["appearance_json"]))),
+                }
             self._audit_share(db, row, "view", "success", address, device_class)
             return {
                 "locked": False,
@@ -594,6 +688,7 @@ class OrganizationService:
                 "title": str(row["title"]),
                 "published_at": str(row["updated_at"]),
                 "document": json.loads(str(row["snapshot_json"])),
+                "appearance": _share_appearance(json.loads(str(row["appearance_json"]))),
             }
 
     def unlock_dashboard_share(

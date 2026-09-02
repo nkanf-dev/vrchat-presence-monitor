@@ -31,6 +31,7 @@ import {
   type DashboardPanel as DashboardPanelModel,
   type DashboardPanelKind,
   dashboardDocumentSchema,
+  dashboardSchema,
   getDashboard,
   getFriends,
   updateDashboard,
@@ -61,6 +62,26 @@ const catalog: CatalogItem[] = [
 ];
 
 const catalogByKind = new Map(catalog.map((item) => [item.kind, item]));
+const viewOptions: Record<DashboardPanelKind, Array<{ value: DashboardPanelModel['view']; label: string }>> = {
+  'online-now': [{ value: 'number', label: '数字卡片' }],
+  'tracked-count': [{ value: 'number', label: '数字卡片' }],
+  'status-breakdown': [{ value: 'donut', label: '环形图' }, { value: 'bar', label: '条形图' }, { value: 'table', label: '数据表' }],
+  'platform-breakdown': [{ value: 'donut', label: '环形图' }, { value: 'bar', label: '条形图' }, { value: 'table', label: '数据表' }],
+  'online-ranking': [{ value: 'bar', label: '条形图' }, { value: 'table', label: '数据表' }],
+  'daily-changes': [{ value: 'area', label: '面积图' }, { value: 'line', label: '折线图' }, { value: 'bar', label: '柱状图' }, { value: 'table', label: '数据表' }],
+  'friend-heatmap': [{ value: 'heatmap', label: '热力图' }, { value: 'table', label: '数据表' }],
+  'world-ranking': [{ value: 'bar', label: '条形图' }, { value: 'table', label: '数据表' }],
+  'collection-coverage': [{ value: 'progress', label: '进度卡片' }, { value: 'number', label: '数字卡片' }],
+};
+const metricOptions: Partial<Record<DashboardPanelKind, Array<{ value: DashboardPanelModel['metric']; label: string }>>> = {
+  'online-now': [{ value: 'count', label: '在线人数' }, { value: 'percent', label: '在线比例' }],
+  'status-breakdown': [{ value: 'count', label: '人数' }, { value: 'percent', label: '人数占比' }],
+  'platform-breakdown': [{ value: 'count', label: '人数' }, { value: 'percent', label: '人数占比' }],
+  'online-ranking': [{ value: 'hours', label: '累计在线小时' }, { value: 'hours_per_day', label: '日均在线小时' }],
+  'friend-heatmap': [{ value: 'ratio', label: '在线比例' }, { value: 'online_minutes', label: '在线分钟' }],
+  'world-ranking': [{ value: 'minutes', label: '游玩时长' }, { value: 'people', label: '游玩人数' }, { value: 'visits', label: '到访次数' }],
+  'collection-coverage': [{ value: 'ratio', label: '覆盖率' }, { value: 'minutes', label: '已覆盖分钟' }],
+};
 const rangeOptions = [1, 7, 30, 90] as const;
 const refreshOptions = [0, 30, 60, 300] as const;
 const DASHBOARD_DRAFT_KEY = 'presence-monitor:dashboard-draft:v1';
@@ -68,18 +89,22 @@ const DASHBOARD_DRAFT_KEY = 'presence-monitor:dashboard-draft:v1';
 const cloneDocument = (document: DashboardDocument): DashboardDocument =>
   structuredClone(document);
 
+const panelPresentationDefaults = {
+  world_sort: 'people', view: 'auto', sort_direction: 'auto', show_legend: true, show_table: true, metric: 'auto',
+} as const;
+
 const validRange = (value: string | null): DashboardDocument['range_days'] | null => {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 730 ? parsed : null;
 };
 
 const samplePanels = (): DashboardPanelModel[] => [
-  { id: 'online-now', kind: 'online-now', title: '当前在线', x: 0, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
-  { id: 'tracked-count', kind: 'tracked-count', title: '追踪人数', x: 3, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
-  { id: 'status-breakdown', kind: 'status-breakdown', title: '当前状态', x: 6, y: 0, w: 6, h: 7, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
-  { id: 'online-ranking', kind: 'online-ranking', title: '在线时长排行', x: 0, y: 4, w: 6, h: 8, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
-  { id: 'daily-changes', kind: 'daily-changes', title: '每日状态变化', x: 6, y: 7, w: 6, h: 5, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
-  { id: 'friend-heatmap', kind: 'friend-heatmap', title: '好友时段热力', x: 0, y: 12, w: 12, h: 9, range_days: 0, limit: 12, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', world_sort: 'people' },
+  { id: 'online-now', kind: 'online-now', title: '当前在线', x: 0, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', ...panelPresentationDefaults },
+  { id: 'tracked-count', kind: 'tracked-count', title: '追踪人数', x: 3, y: 0, w: 3, h: 4, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', ...panelPresentationDefaults },
+  { id: 'status-breakdown', kind: 'status-breakdown', title: '当前状态', x: 6, y: 0, w: 6, h: 7, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', ...panelPresentationDefaults },
+  { id: 'online-ranking', kind: 'online-ranking', title: '在线时长排行', x: 0, y: 4, w: 6, h: 8, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', ...panelPresentationDefaults },
+  { id: 'daily-changes', kind: 'daily-changes', title: '每日状态变化', x: 6, y: 7, w: 6, h: 5, range_days: 0, limit: 10, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', ...panelPresentationDefaults },
+  { id: 'friend-heatmap', kind: 'friend-heatmap', title: '好友时段热力', x: 0, y: 12, w: 12, h: 9, range_days: 0, limit: 12, include_self: true, friend_ids: [], statuses: [], platforms: [], world_ids: [], world_tag: '', ...panelPresentationDefaults },
 ];
 
 const validRefresh = (value: string | null): DashboardDocument['refresh_seconds'] | null => {
@@ -94,7 +119,8 @@ const conflictDashboard = (error: unknown): Dashboard | null => {
   if (!(error instanceof ApiError) || error.status !== 409 || !error.details || typeof error.details !== 'object') return null;
   const server = 'server' in error.details ? error.details.server : null;
   if (!server || typeof server !== 'object' || !('document' in server)) return null;
-  return server as Dashboard;
+  const parsed = dashboardSchema.safeParse(server);
+  return parsed.success ? parsed.data : null;
 };
 
 function WorkspaceDialog({
@@ -303,7 +329,7 @@ export function DashboardView({
           platforms: [],
           world_ids: [],
           world_tag: '',
-          world_sort: 'people',
+          ...panelPresentationDefaults,
         }],
       };
     });
@@ -316,6 +342,20 @@ export function DashboardView({
       ...current,
       panels: current.panels.map((panel) => panel.id === panelId ? { ...panel, ...patch } : panel),
     }));
+  };
+
+  const changePanelKind = (panel: DashboardPanelModel, kind: DashboardPanelKind) => {
+    const previous = catalogByKind.get(panel.kind);
+    const next = catalogByKind.get(kind);
+    updatePanel(panel.id, {
+      kind,
+      title: !panel.title || panel.title === previous?.title ? next?.title ?? panel.title : panel.title,
+      view: 'auto',
+      range_days: kind === 'world-ranking' ? 30 : panel.range_days,
+      world_sort: 'people',
+      sort_direction: 'auto',
+      metric: 'auto',
+    });
   };
 
   const duplicatePanel = (source: DashboardPanelModel) => {
@@ -485,6 +525,7 @@ export function DashboardView({
             dragConfig={{ enabled: editing && !mobile, bounded: true, handle: '.dashboard-panel-drag' }}
             resizeConfig={{ enabled: editing && !mobile, handles: ['se'] }}
             compactor={verticalCompactor}
+            onLayoutChange={(next) => applyLayout(next)}
             onDragStop={(next) => applyLayout(next)}
             onResizeStop={(next) => applyLayout(next)}
           >
@@ -542,8 +583,17 @@ export function DashboardView({
       {editingPanel && (
         <WorkspaceDialog title="配置图表" onClose={() => setEditingPanelId(null)}>
           <form className="dashboard-panel-form" onSubmit={(event) => { event.preventDefault(); setEditingPanelId(null); }}>
+            <label><span>数据内容</span><select value={editingPanel.kind} onChange={(event) => changePanelKind(editingPanel, event.target.value as DashboardPanelKind)}>
+              {catalog.map((item) => <option key={item.kind} value={item.kind}>{item.title}</option>)}
+            </select></label>
             <label><span>标题</span><input value={editingPanel.title} maxLength={80} onChange={(event) => updatePanel(editingPanel.id, { title: event.target.value })} /></label>
-            {!['online-now', 'tracked-count', 'status-breakdown'].includes(editingPanel.kind) && (
+            <label><span>显示方式</span><select value={editingPanel.view === 'auto' ? viewOptions[editingPanel.kind][0]?.value : editingPanel.view} onChange={(event) => updatePanel(editingPanel.id, { view: event.target.value as DashboardPanelModel['view'] })}>
+              {viewOptions[editingPanel.kind].map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select></label>
+            {metricOptions[editingPanel.kind] && <label><span>指标</span><select value={editingPanel.metric === 'auto' ? metricOptions[editingPanel.kind]?.[0]?.value : editingPanel.metric} onChange={(event) => updatePanel(editingPanel.id, { metric: event.target.value as DashboardPanelModel['metric'] })}>
+              {metricOptions[editingPanel.kind]?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select></label>}
+            {!['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown'].includes(editingPanel.kind) && (
               <label><span>时间范围</span><select value={editingPanel.range_days} onChange={(event) => updatePanel(editingPanel.id, { range_days: Number(event.target.value) as DashboardPanelModel['range_days'] })}>
                 <option value={0}>跟随全局</option>
                 <option value={1}>1 天</option><option value={7}>7 天</option><option value={30}>30 天</option>
@@ -553,10 +603,21 @@ export function DashboardView({
             {['online-ranking', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
               <label><span>显示数量</span><input type="number" min={3} max={30} value={editingPanel.limit} onChange={(event) => updatePanel(editingPanel.id, { limit: Math.max(3, Math.min(30, Number(event.target.value))) })} /></label>
             )}
-            {['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
+            {['status-breakdown', 'platform-breakdown', 'online-ranking', 'daily-changes', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
+              <label><span>排列顺序</span><select value={editingPanel.sort_direction} onChange={(event) => updatePanel(editingPanel.id, { sort_direction: event.target.value as DashboardPanelModel['sort_direction'] })}>
+                <option value="auto">推荐顺序</option><option value="desc">从高到低 / 最新优先</option><option value="asc">从低到高 / 最早优先</option>
+              </select></label>
+            )}
+            {(['status-breakdown', 'platform-breakdown'].includes(editingPanel.kind) && editingPanel.view !== 'bar' && editingPanel.view !== 'table' || editingPanel.kind === 'friend-heatmap') && (
+              <label className="dashboard-checkbox"><input type="checkbox" checked={editingPanel.show_legend} onChange={(event) => updatePanel(editingPanel.id, { show_legend: event.target.checked })} /><span>显示图例</span></label>
+            )}
+            {['status-breakdown', 'platform-breakdown', 'online-ranking', 'daily-changes', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && editingPanel.view !== 'table' && (
+              <label className="dashboard-checkbox"><input type="checkbox" checked={editingPanel.show_table} onChange={(event) => updatePanel(editingPanel.id, { show_table: event.target.checked })} /><span>提供数据表</span></label>
+            )}
+            {['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown', 'online-ranking', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
               <label className="dashboard-checkbox"><input type="checkbox" checked={editingPanel.include_self} onChange={(event) => updatePanel(editingPanel.id, { include_self: event.target.checked })} /><span>包含自己的账号</span></label>
             )}
-            {editingPanel.kind !== 'daily-changes' && (
+            {['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown', 'online-ranking', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
               <fieldset className="dashboard-filter-group">
                 <legend>玩家</legend>
                 <input
@@ -574,12 +635,10 @@ export function DashboardView({
                         <input
                           type="checkbox"
                           checked={checked}
-                          disabled={!checked && editingPanel.kind !== 'world-ranking' && editingPanel.friend_ids.length >= 50}
+                          disabled={!checked && editingPanel.friend_ids.length >= 50}
                           onChange={(event) => updatePanel(editingPanel.id, {
                             friend_ids: event.target.checked
-                              ? editingPanel.kind === 'world-ranking'
-                                ? [friend.id]
-                                : [...editingPanel.friend_ids, friend.id].slice(0, 50)
+                              ? [...editingPanel.friend_ids, friend.id].slice(0, 50)
                               : editingPanel.friend_ids.filter((id) => id !== friend.id),
                           })}
                         />
@@ -587,7 +646,7 @@ export function DashboardView({
                       </label>;
                     })}
                 </div>
-                <small>{editingPanel.friend_ids.length ? `已选择 ${editingPanel.friend_ids.length} 位；不选择时使用全部玩家` : '当前使用全部玩家'}{editingPanel.kind === 'world-ranking' ? '；世界排行一次筛选一位玩家' : ''}</small>
+                <small>{editingPanel.friend_ids.length ? `已选择 ${editingPanel.friend_ids.length} 位；不选择时使用全部玩家` : '当前使用全部玩家'}</small>
               </fieldset>
             )}
             {['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown'].includes(editingPanel.kind) && (
@@ -611,7 +670,13 @@ export function DashboardView({
               </fieldset>
             )}
             {editingPanel.kind === 'world-ranking' && <>
-              <label><span>排序方式</span><select value={editingPanel.world_sort} onChange={(event) => updatePanel(editingPanel.id, { world_sort: event.target.value as DashboardPanelModel['world_sort'] })}>
+              <label><span>排序方式</span><select value={editingPanel.world_sort} onChange={(event) => {
+                const worldSort = event.target.value as DashboardPanelModel['world_sort'];
+                updatePanel(editingPanel.id, {
+                  world_sort: worldSort,
+                  ...(worldSort === 'recent' ? { view: 'table' } : { metric: worldSort }),
+                });
+              }}>
                 <option value="people">游玩人数</option>
                 <option value="minutes">游玩时长</option>
                 <option value="visits">到访次数</option>
@@ -621,7 +686,6 @@ export function DashboardView({
               <label><span>限定世界 ID（逗号分隔）</span><input value={editingPanel.world_ids.join(', ')} placeholder="wrld_..." onChange={(event) => updatePanel(editingPanel.id, {
                 world_ids: event.target.value.split(',').map((value) => value.trim()).filter((value) => value.startsWith('wrld_')).slice(0, 50),
               })} /></label>
-              {editingPanel.friend_ids.length > 1 && <small className="dashboard-form-note">世界排行一次聚合一位玩家；当前将使用全部玩家。保留一位即可查看其个人世界排行。</small>}
             </>}
             <div className="dashboard-dialog-actions">
               <button type="button" className="button button-danger" onClick={() => removePanel(editingPanel.id)}><Trash2 size={16} aria-hidden="true" />删除图表</button>

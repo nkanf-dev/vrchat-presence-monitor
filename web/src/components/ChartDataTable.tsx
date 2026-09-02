@@ -16,6 +16,7 @@ export function ChartDataTable<Row>({
   rows,
   getRowKey,
   emptyMessage = '这里还没有可显示的数据。',
+  alwaysOpen = false,
 }: {
   label: string;
   summary?: string;
@@ -23,6 +24,7 @@ export function ChartDataTable<Row>({
   rows: Row[];
   getRowKey: (row: Row, index: number) => Key;
   emptyMessage?: string;
+  alwaysOpen?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -30,42 +32,28 @@ export function ChartDataTable<Row>({
     setExpanded(event.currentTarget.open);
   };
 
+  const content = rows.length ? (
+    <table className="chart-data-table">
+      <caption>{label}</caption>
+      <thead><tr>{columns.map((column) => <th key={column.key} scope="col">{column.header}</th>)}</tr></thead>
+      <tbody>{rows.map((row, rowIndex) => (
+        <tr key={getRowKey(row, rowIndex)}>{columns.map((column) => {
+          const cell = column.render(row);
+          const dataLabel = column.dataLabel ?? (typeof column.header === 'string' ? column.header : '');
+          return column.rowHeader
+            ? <th key={column.key} scope="row" data-label={dataLabel}>{cell}</th>
+            : <td key={column.key} data-label={dataLabel}>{cell}</td>;
+        })}</tr>
+      ))}</tbody>
+    </table>
+  ) : <p className="chart-data-empty">{emptyMessage}</p>;
+
+  if (alwaysOpen) return <div className="chart-data-table-wrap chart-data-table-standalone">{content}</div>;
+
   return (
     <details className="chart-data-disclosure" onToggle={handleToggle}>
       <summary role="button" aria-expanded={expanded}>{summary}</summary>
-      {expanded && (
-        <div className="chart-data-table-wrap">
-          {rows.length ? (
-            <table className="chart-data-table">
-              <caption>{label}</caption>
-              <thead>
-                <tr>
-                  {columns.map((column) => (
-                    <th key={column.key} scope="col">{column.header}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, rowIndex) => (
-                  <tr key={getRowKey(row, rowIndex)}>
-                    {columns.map((column) => {
-                      const content = column.render(row);
-                      const dataLabel = column.dataLabel ?? (typeof column.header === 'string' ? column.header : '');
-                      return column.rowHeader ? (
-                        <th key={column.key} scope="row" data-label={dataLabel}>{content}</th>
-                      ) : (
-                        <td key={column.key} data-label={dataLabel}>{content}</td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p className="chart-data-empty">{emptyMessage}</p>
-          )}
-        </div>
-      )}
+      {expanded && <div className="chart-data-table-wrap">{content}</div>}
     </details>
   );
 }

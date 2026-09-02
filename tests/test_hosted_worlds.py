@@ -997,6 +997,19 @@ class DiscoveryTests(unittest.TestCase):
             tenant_id, 7, world_tag="author_tag_social"
         )
         only_self = discovery.discover(tenant_id, 7, friend_id="usr_self")
+        selected_people = discovery.discover(
+            tenant_id,
+            7,
+            friend_ids=["usr_self", "usr_friend"],
+            hot_sort="minutes",
+            sort_direction="asc",
+        )
+        selected_world = discovery.discover(
+            tenant_id,
+            7,
+            friend_ids=["usr_self", "usr_friend"],
+            world_ids=[WORLD_B],
+        )
 
         self.assertEqual(
             [item["world_id"] for item in without_self["hot"]], [WORLD_B]
@@ -1006,6 +1019,13 @@ class DiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["world_id"] for item in only_self["hot"]], [WORLD_C]
+        )
+        self.assertEqual(
+            [item["world_id"] for item in selected_people["hot"]],
+            [WORLD_C, WORLD_B],
+        )
+        self.assertEqual(
+            [item["world_id"] for item in selected_world["hot"]], [WORLD_B]
         )
         with self.assertRaises(KeyError):
             discovery.discover(tenant_id, 7, friend_id="usr_other")

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,6 +10,9 @@ const api = vi.hoisted(() => ({
   getDashboard: vi.fn(),
   updateDashboard: vi.fn(),
 }));
+const grid = vi.hoisted(() => ({
+  onLayoutChange: undefined as undefined | ((layout: Array<Record<string, unknown>>) => void),
+}));
 
 vi.mock('../api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api')>()),
@@ -17,7 +20,10 @@ vi.mock('../api', async (importOriginal) => ({
 }));
 
 vi.mock('react-grid-layout', () => ({
-  default: ({ children }: { children: React.ReactNode }) => <div data-testid="dashboard-grid">{children}</div>,
+  default: ({ children, onLayoutChange }: { children: React.ReactNode; onLayoutChange?: typeof grid.onLayoutChange }) => {
+    grid.onLayoutChange = onLayoutChange;
+    return <div data-testid="dashboard-grid">{children}</div>;
+  },
   useContainerWidth: () => ({ width: 1200, containerRef: () => undefined, mounted: true }),
   verticalCompactor: {},
 }));
@@ -51,6 +57,11 @@ const dashboard: Dashboard = {
       world_ids: [],
       world_tag: '',
       world_sort: 'people',
+      view: 'auto',
+      sort_direction: 'auto',
+      show_legend: true,
+      show_table: true,
+      metric: 'auto',
     }],
   },
 };
@@ -70,6 +81,7 @@ function renderDashboard() {
 
 describe('DashboardView', () => {
   beforeEach(() => {
+    grid.onLayoutChange = undefined;
     window.sessionStorage.clear();
     api.getDashboard.mockResolvedValue(structuredClone(dashboard));
     api.updateDashboard.mockImplementation(async (value) => ({
@@ -100,5 +112,22 @@ describe('DashboardView', () => {
       ]) }),
     })));
     expect(await screen.findByText(/已保存/)).toBeVisible();
+  });
+
+  it('persists the normalized grid layout reported by the layout engine', async () => {
+    const user = userEvent.setup();
+    renderDashboard();
+    expect(await screen.findByRole('heading', { name: '我的仪表盘' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '编辑布局' }));
+    await waitFor(() => expect(grid.onLayoutChange).toBeTypeOf('function'));
+    act(() => grid.onLayoutChange?.([{ i: 'online-now', x: 2, y: 3, w: 4, h: 5 }]));
+    await user.click(screen.getByRole('button', { name: '保存' }));
+
+    await waitFor(() => expect(api.updateDashboard).toHaveBeenCalledWith(expect.objectContaining({
+      document: expect.objectContaining({
+        panels: [expect.objectContaining({ id: 'online-now', x: 2, y: 3, w: 4, h: 5 })],
+      }),
+    })));
   });
 });

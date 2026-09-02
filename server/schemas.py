@@ -71,6 +71,16 @@ class DashboardPanelRequest(StrictModel):
     world_ids: list[str] = Field(default_factory=list, max_length=50)
     world_tag: str = Field(default="", max_length=160)
     world_sort: Literal["people", "minutes", "visits", "recent"] = "people"
+    view: Literal[
+        "auto", "number", "progress", "donut", "bar", "line", "area", "heatmap", "table"
+    ] = "auto"
+    sort_direction: Literal["auto", "asc", "desc"] = "auto"
+    show_legend: bool = True
+    show_table: bool = True
+    metric: Literal[
+        "auto", "count", "percent", "hours", "hours_per_day", "changes", "ratio",
+        "online_minutes", "people", "minutes", "visits"
+    ] = "auto"
 
     @model_validator(mode="after")
     def validate_grid_bounds(self) -> "DashboardPanelRequest":
@@ -108,8 +118,20 @@ class DashboardQueryRequest(StrictModel):
     global_range_days: int = Field(default=7, ge=1, le=730)
 
 
+class DashboardShareAppearanceRequest(StrictModel):
+    preset: Literal["midnight", "aurora", "paper", "sunset"] = "midnight"
+    heading: str = Field(default="", max_length=120)
+    description: str = Field(default="", max_length=500)
+    page_title: str = Field(default="", max_length=120)
+    avatar_url: str = Field(default="", max_length=2048)
+    custom_css: str = Field(default="", max_length=12_000)
+
+
 class DashboardSharePutRequest(StrictModel):
     password: str = Field(default="", max_length=256)
+    appearance: DashboardShareAppearanceRequest = Field(
+        default_factory=DashboardShareAppearanceRequest
+    )
 
 
 class DashboardShareUnlockRequest(StrictModel):

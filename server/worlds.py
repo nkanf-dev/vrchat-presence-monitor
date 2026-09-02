@@ -592,19 +592,38 @@ class DiscoveryService:
         tenant_id: str,
         *,
         friend_id: str,
+        friend_ids: list[str] | None = None,
         include_self: bool,
     ) -> dict[str, Any]:
         with self.store.lock, self.store.connection() as db:
             self.store._require_tenant(db, tenant_id)
-            _require_filter_ids(db, tenant_id, friend_id=friend_id)
+            selected_ids = list(
+                dict.fromkeys(
+                    [friend_id]
+                    if friend_id
+                    else [str(value) for value in (friend_ids or []) if str(value)]
+                )
+            )
+            if selected_ids:
+                placeholders = ",".join("?" for _ in selected_ids)
+                found = {
+                    str(row["id"])
+                    for row in db.execute(
+                        f"SELECT id FROM friends WHERE tenant_id=? AND id IN ({placeholders})",
+                        (tenant_id, *selected_ids),
+                    ).fetchall()
+                }
+                if found != set(selected_ids):
+                    raise KeyError("friend not found")
             friend_clauses = [
                 "f.tenant_id=?",
                 "substr(f.id,1,4) NOT IN ('not_','frq_')",
             ]
             friend_params: list[Any] = [tenant_id]
-            if friend_id:
-                friend_clauses.append("f.id=?")
-                friend_params.append(friend_id)
+            if selected_ids:
+                placeholders = ",".join("?" for _ in selected_ids)
+                friend_clauses.append(f"f.id IN ({placeholders})")
+                friend_params.extend(selected_ids)
             if not include_self:
                 friend_clauses.append("f.is_self=0")
             friends = [
@@ -1129,8 +1148,42 @@ class DiscoveryService:
         *,
         limit: int,
         offset: int,
+        world_ids: list[str] | None = None,
+        hot_sort: str = "people",
+        sort_direction: str = "desc",
     ) -> dict[str, Any]:
-        hot_ranked = payload["hot"]
+        selected_worlds = {str(value) for value in (world_ids or [])}
+        hot_ranked = [
+            copy.deepcopy(item)
+            for item in payload["hot"]
+            if not selected_worlds or str(item["world_id"]) in selected_worlds
+        ]
+        hot_sort_keys = {
+            "people": lambda item: (
+                int(item.get("unique_people") or 0),
+                int(item.get("visit_count") or 0),
+                float(item.get("minutes") or 0),
+            ),
+            "minutes": lambda item: (
+                float(item.get("minutes") or 0),
+                int(item.get("unique_people") or 0),
+            ),
+            "visits": lambda item: (
+                int(item.get("visit_count") or 0),
+                float(item.get("minutes") or 0),
+            ),
+            "recent": lambda item: self._last_observed_number(
+                item.get("last_observed")
+            ),
+        }
+        if hot_sort not in hot_sort_keys:
+            raise ValueError("世界排序方式无效")
+        hot_ranked.sort(
+            key=hot_sort_keys[hot_sort],
+            reverse=sort_direction != "asc",
+        )
+        for rank, item in enumerate(hot_ranked, 1):
+            item["rank"] = rank
         rising_ranked = payload["rising"]
         hot_page = hot_ranked[offset : offset + limit]
         rising_page = rising_ranked[offset : offset + limit]
@@ -1166,7 +1219,11 @@ class DiscoveryService:
         tenant_id: str,
         days: int,
         friend_id: str = "",
+        friend_ids: list[str] | None = None,
         world_tag: str = "",
+        world_ids: list[str] | None = None,
+        hot_sort: str = "people",
+        sort_direction: str = "desc",
         include_self: bool = True,
         limit: int = 30,
         offset: int = 0,
@@ -1183,6 +1240,7 @@ class DiscoveryService:
         scope = self._scope(
             tenant_id,
             friend_id=str(friend_id or ""),
+            friend_ids=friend_ids,
             include_self=bool(include_self),
         )
         start = (
@@ -1213,6 +1271,9 @@ class DiscoveryService:
                 cached_payload,
                 limit=page_size,
                 offset=page_offset,
+                world_ids=world_ids,
+                hot_sort=hot_sort,
+                sort_direction=sort_direction,
             )
 
         snapshot = self._snapshot(
@@ -1242,4 +1303,7 @@ class DiscoveryService:
             payload,
             limit=page_size,
             offset=page_offset,
+            world_ids=world_ids,
+            hot_sort=hot_sort,
+            sort_direction=sort_direction,
         )
