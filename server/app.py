@@ -363,7 +363,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )
         if request.url.path.startswith("/assets/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        elif request.url.path == "/v1/world-image":
+        elif request.url.path == "/v1/world-image" or request.url.path in {
+            "/icon.svg",
+            "/favicon-32.png",
+            "/apple-touch-icon.png",
+            "/icon-192.png",
+            "/icon-512.png",
+            "/manifest.webmanifest",
+        }:
             response.headers["Cache-Control"] = "public, max-age=86400, immutable"
         else:
             response.headers["Cache-Control"] = "no-store"
@@ -1260,6 +1267,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     assets = config.static_dir / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+
+    @app.get("/icon.svg")
+    @app.get("/favicon-32.png")
+    @app.get("/apple-touch-icon.png")
+    @app.get("/icon-192.png")
+    @app.get("/icon-512.png")
+    @app.get("/manifest.webmanifest")
+    def root_static_asset(request: Request):
+        asset = config.static_dir / request.url.path.removeprefix("/")
+        if not asset.is_file():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        return FileResponse(asset)
 
     @app.get("/")
     @app.get("/{path:path}")
