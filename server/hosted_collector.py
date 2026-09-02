@@ -116,7 +116,7 @@ def _normalize_friend(
     event_type: str = "",
 ) -> dict[str, Any] | None:
     friend_id = str(raw.get("id") or raw.get("userId") or "")
-    if not friend_id:
+    if not friend_id or not friend_id.startswith("usr_"):
         return None
     event_type = str(event_type or "").strip().lower()
     partial = bool(event_type)

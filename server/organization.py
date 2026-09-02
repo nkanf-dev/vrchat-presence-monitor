@@ -1,13 +1,35 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .storage import Store, now
+
+
+SHARE_SESSION_HOURS = 24
+
+
+def _share_password(password: str, salt_hex: str) -> str:
+    return hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=bytes.fromhex(salt_hex),
+        n=2**15,
+        r=8,
+        p=1,
+        dklen=32,
+        maxmem=64 * 1024 * 1024,
+    ).hex()
+
+
+def _share_fingerprint(audit_salt: str, address: str) -> str:
+    return hmac.new(bytes.fromhex(audit_salt), address.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
 class OrganizationNotFound(KeyError):
@@ -411,3 +433,189 @@ class OrganizationService:
                 (tenant_id, encoded, revision, stamp),
             )
         return {"revision": revision, "updated_at": stamp, "document": document}
+
+    @staticmethod
+    def _share_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None or row["revoked_at"] is not None:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "id": str(row["id"]),
+            "title": str(row["title"]),
+            "protected": bool(row["password_hash"]),
+            "source_revision": str(row["source_revision"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def get_dashboard_share(self, tenant_id: str) -> dict[str, Any]:
+        with self.store.lock, self.store.connection() as db:
+            self.store._require_tenant(db, tenant_id)
+            row = db.execute(
+                "SELECT * FROM dashboard_shares WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+            payload = self._share_payload(row)
+            if payload["enabled"]:
+                payload["access_total"] = int(db.execute(
+                    "SELECT COUNT(*) FROM dashboard_share_audit WHERE tenant_id=? AND event_type='view' AND outcome='success'",
+                    (tenant_id,),
+                ).fetchone()[0])
+                recent = db.execute(
+                    "SELECT MAX(occurred_at) FROM dashboard_share_audit WHERE tenant_id=? AND event_type='view' AND outcome='success'",
+                    (tenant_id,),
+                ).fetchone()[0]
+                payload["last_access"] = str(recent) if recent else None
+            return payload
+
+    def publish_dashboard_share(
+        self, tenant_id: str, password: str
+    ) -> dict[str, Any]:
+        normalized_password = str(password or "")
+        stamp = now()
+        with self.store.lock, self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.store._require_tenant(db, tenant_id)
+            dashboard_row = db.execute(
+                "SELECT document_json,revision,updated_at FROM dashboard_configs WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+            dashboard = self._dashboard_payload(dashboard_row)
+            document = dashboard["document"]
+            encoded = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            current = db.execute(
+                "SELECT * FROM dashboard_shares WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+            share_id = str(current["id"]) if current else secrets.token_urlsafe(24)
+            audit_salt = str(current["audit_salt"]) if current else secrets.token_hex(32)
+            created_at = str(current["created_at"]) if current else stamp
+            auth_version = int(current["auth_version"] if current else 0) + 1
+            password_salt = secrets.token_hex(16) if normalized_password else ""
+            password_hash = _share_password(normalized_password, password_salt) if normalized_password else ""
+            db.execute(
+                """INSERT INTO dashboard_shares(
+                    id,tenant_id,title,snapshot_json,source_revision,password_salt,password_hash,
+                    audit_salt,auth_version,created_at,updated_at,revoked_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL)
+                ON CONFLICT(tenant_id) DO UPDATE SET
+                    title=excluded.title,snapshot_json=excluded.snapshot_json,
+                    source_revision=excluded.source_revision,password_salt=excluded.password_salt,
+                    password_hash=excluded.password_hash,auth_version=excluded.auth_version,
+                    updated_at=excluded.updated_at,revoked_at=NULL""",
+                (
+                    share_id, tenant_id, str(document.get("title") or "共享仪表盘"), encoded,
+                    str(dashboard.get("revision") or ""), password_salt, password_hash,
+                    audit_salt, auth_version, created_at, stamp,
+                ),
+            )
+            db.execute("DELETE FROM dashboard_share_sessions WHERE share_id=?", (share_id,))
+            row = db.execute("SELECT * FROM dashboard_shares WHERE id=?", (share_id,)).fetchone()
+        return self._share_payload(row)
+
+    def revoke_dashboard_share(self, tenant_id: str) -> bool:
+        stamp = now()
+        with self.store.lock, self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT id FROM dashboard_shares WHERE tenant_id=? AND revoked_at IS NULL",
+                (tenant_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            share_id = str(row["id"])
+            db.execute(
+                "UPDATE dashboard_shares SET revoked_at=?,updated_at=?,auth_version=auth_version+1 WHERE id=?",
+                (stamp, stamp, share_id),
+            )
+            db.execute("DELETE FROM dashboard_share_sessions WHERE share_id=?", (share_id,))
+            return True
+
+    def dashboard_share_audit(
+        self, tenant_id: str, *, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        with self.store.lock, self.store.connection() as db:
+            self.store._require_tenant(db, tenant_id)
+            total = int(db.execute(
+                "SELECT COUNT(*) FROM dashboard_share_audit WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()[0])
+            items = [dict(row) for row in db.execute(
+                """SELECT id,occurred_at,event_type,outcome,visitor_hash,device_class
+                FROM dashboard_share_audit WHERE tenant_id=?
+                ORDER BY occurred_at DESC,id DESC LIMIT ? OFFSET ?""",
+                (tenant_id, limit, offset),
+            ).fetchall()]
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def _audit_share(
+        self,
+        db: sqlite3.Connection,
+        row: sqlite3.Row,
+        event_type: str,
+        outcome: str,
+        address: str,
+        device_class: str,
+    ) -> None:
+        db.execute(
+            """INSERT INTO dashboard_share_audit(
+                tenant_id,share_id,occurred_at,event_type,outcome,visitor_hash,device_class
+            ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                str(row["tenant_id"]), str(row["id"]), now(), event_type, outcome,
+                _share_fingerprint(str(row["audit_salt"]), address), device_class,
+            ),
+        )
+
+    def public_dashboard_share(
+        self, share_id: str, session_token: str, address: str, device_class: str
+    ) -> dict[str, Any]:
+        with self.store.lock, self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM dashboard_shares WHERE id=? AND revoked_at IS NULL", (share_id,)
+            ).fetchone()
+            if row is None:
+                raise OrganizationNotFound("share not found")
+            granted = not bool(row["password_hash"])
+            if not granted and session_token:
+                session = db.execute(
+                    """SELECT 1 FROM dashboard_share_sessions
+                    WHERE token_hash=? AND share_id=? AND auth_version=? AND expires_at>?""",
+                    (hashlib.sha256(session_token.encode()).hexdigest(), share_id, int(row["auth_version"]), now()),
+                ).fetchone()
+                granted = session is not None
+            if not granted:
+                return {"locked": True, "title": str(row["title"]), "protected": True}
+            self._audit_share(db, row, "view", "success", address, device_class)
+            return {
+                "locked": False,
+                "id": share_id,
+                "tenant_id": str(row["tenant_id"]),
+                "title": str(row["title"]),
+                "published_at": str(row["updated_at"]),
+                "document": json.loads(str(row["snapshot_json"])),
+            }
+
+    def unlock_dashboard_share(
+        self, share_id: str, password: str, address: str, device_class: str
+    ) -> str | None:
+        with self.store.lock, self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM dashboard_shares WHERE id=? AND revoked_at IS NULL", (share_id,)
+            ).fetchone()
+            if row is None:
+                raise OrganizationNotFound("share not found")
+            expected = str(row["password_hash"])
+            supplied = _share_password(str(password or ""), str(row["password_salt"])) if expected else ""
+            if expected and not secrets.compare_digest(supplied, expected):
+                self._audit_share(db, row, "unlock", "invalid_password", address, device_class)
+                return None
+            token = secrets.token_urlsafe(32)
+            expires = (datetime.now(timezone.utc) + timedelta(hours=SHARE_SESSION_HOURS)).isoformat(timespec="microseconds")
+            db.execute(
+                "INSERT INTO dashboard_share_sessions(token_hash,share_id,auth_version,created_at,expires_at) VALUES(?,?,?,?,?)",
+                (hashlib.sha256(token.encode()).hexdigest(), share_id, int(row["auth_version"]), now(), expires),
+            )
+            self._audit_share(db, row, "unlock", "success", address, device_class)
+            return token

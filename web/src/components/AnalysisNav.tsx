@@ -6,7 +6,6 @@ const items = [
   { id: 'daily', label: '每日在线' },
   { id: 'worlds', label: '世界时间轴' },
   { id: 'discover', label: '世界发现' },
-  { id: 'dashboard', label: '自定义图表' },
 ] as const satisfies ReadonlyArray<{ id: AnalysisSection; label: string }>;
 
 const shouldHandleNavigation = (event: MouseEvent<HTMLAnchorElement>) =>

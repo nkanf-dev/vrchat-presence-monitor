@@ -285,6 +285,45 @@ class Store:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS dashboard_shares (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL CHECK(length(CAST(snapshot_json AS BLOB)) BETWEEN 2 AND 65536),
+                source_revision TEXT NOT NULL DEFAULT '',
+                password_salt TEXT NOT NULL DEFAULT '',
+                password_hash TEXT NOT NULL DEFAULT '',
+                audit_salt TEXT NOT NULL,
+                auth_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revoked_at TEXT,
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS dashboard_share_sessions (
+                token_hash TEXT PRIMARY KEY,
+                share_id TEXT NOT NULL,
+                auth_version INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(share_id) REFERENCES dashboard_shares(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_dashboard_share_sessions_share
+                ON dashboard_share_sessions(share_id, expires_at);
+            CREATE TABLE IF NOT EXISTS dashboard_share_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                share_id TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                visitor_hash TEXT NOT NULL DEFAULT '',
+                device_class TEXT NOT NULL DEFAULT 'unknown',
+                FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+                FOREIGN KEY(share_id) REFERENCES dashboard_shares(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_dashboard_share_audit_tenant_time
+                ON dashboard_share_audit(tenant_id, occurred_at DESC, id DESC);
             CREATE TABLE IF NOT EXISTS vrchat_accounts (
                 tenant_id TEXT PRIMARY KEY,
                 vrchat_user_id TEXT NOT NULL UNIQUE,
@@ -1846,19 +1885,22 @@ class Store:
             friend_counts = db.execute(
                 """SELECT COUNT(*) AS tracked_count,
                 SUM(CASE WHEN status <> 'offline' THEN 1 ELSE 0 END) AS online_count
-                FROM friends WHERE tenant_id=?""",
+                FROM friends WHERE tenant_id=?
+                AND substr(id,1,4) NOT IN ('not_','frq_')""",
                 (tenant_id,),
             ).fetchone()
             event_counts = db.execute(
                 """SELECT COUNT(*) AS event_total,
                 SUM(CASE WHEN occurred_at >= ? THEN 1 ELSE 0 END) AS change_count_7d
-                FROM status_events WHERE tenant_id=?""",
+                FROM status_events WHERE tenant_id=?
+                AND substr(friend_id,1,4) NOT IN ('not_','frq_')""",
                 (seven_days_ago, tenant_id),
             ).fetchone()
             status_counts = {
                 str(row["status"]): int(row["count"])
                 for row in db.execute(
-                    "SELECT status, COUNT(*) AS count FROM friends WHERE tenant_id=? GROUP BY status",
+                    """SELECT status, COUNT(*) AS count FROM friends WHERE tenant_id=?
+                    AND substr(id,1,4) NOT IN ('not_','frq_') GROUP BY status""",
                     (tenant_id,),
                 ).fetchall()
             }
@@ -1909,7 +1951,10 @@ class Store:
         offset: int = 0,
     ) -> dict[str, Any]:
         limit, offset = self._page_bounds(limit, offset)
-        clauses = ["tenant_id=?"]
+        clauses = [
+            "tenant_id=?",
+            "substr(id,1,4) NOT IN ('not_','frq_')",
+        ]
         params: list[Any] = [tenant_id]
         if query.strip():
             clauses.append("(display_name LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\')")
@@ -1935,6 +1980,48 @@ class Store:
             ]
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
+    def dashboard_current(
+        self,
+        tenant_id: str,
+        *,
+        friend_ids: list[str] | None = None,
+        statuses: list[str] | None = None,
+        platforms: list[str] | None = None,
+        include_self: bool = True,
+    ) -> dict[str, Any]:
+        clauses = [
+            "tenant_id=?",
+            "substr(id,1,4) NOT IN ('not_','frq_')",
+        ]
+        params: list[Any] = [tenant_id]
+        if not include_self:
+            clauses.append("is_self=0")
+        for values, column in ((friend_ids or [], "id"), (statuses or [], "status"), (platforms or [], "platform")):
+            if values:
+                clauses.append(f"{column} IN ({','.join('?' for _ in values)})")
+                params.extend(values)
+        where = " AND ".join(clauses)
+        with self.lock, self.connection() as db:
+            self._require_tenant(db, tenant_id)
+            rows = db.execute(
+                f"SELECT id,status,platform,is_self FROM friends WHERE {where}", params
+            ).fetchall()
+        status_counts: dict[str, int] = {}
+        platform_counts: dict[str, int] = {}
+        online = 0
+        for row in rows:
+            status_value = str(row["status"] or "offline")
+            platform_value = str(row["platform"] or "unknown")
+            status_counts[status_value] = status_counts.get(status_value, 0) + 1
+            platform_counts[platform_value] = platform_counts.get(platform_value, 0) + 1
+            online += int(status_value != "offline")
+        return {
+            "tracked_count": len(rows),
+            "online_count": online,
+            "status_counts": status_counts,
+            "platform_counts": platform_counts,
+        }
+
     def events_page(
         self,
         tenant_id: str,
@@ -1944,7 +2031,10 @@ class Store:
         offset: int = 0,
     ) -> dict[str, Any]:
         limit, offset = self._page_bounds(limit, offset)
-        clauses = ["e.tenant_id=?"]
+        clauses = [
+            "e.tenant_id=?",
+            "substr(e.friend_id,1,4) NOT IN ('not_','frq_')",
+        ]
         params: list[Any] = [tenant_id]
         if query.strip():
             clauses.append(

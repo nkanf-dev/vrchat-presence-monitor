@@ -614,8 +614,10 @@ def event_to_friend(event: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(candidate, dict):
         return None
     user = candidate.get("user") if isinstance(candidate.get("user"), dict) else candidate
-    friend_id = user.get("id") or user.get("userId") or candidate.get("userId")
-    if not friend_id:
+    friend_id = str(user.get("id") or user.get("userId") or candidate.get("userId") or "")
+    # Pipeline also carries notifications whose identifiers use not_/frq_.  They
+    # are durable raw evidence, but they are not VRChat user identities.
+    if not friend_id.startswith("usr_"):
         return None
     result = dict(user)
     result.update(presence_fields(result.get("presence") or candidate.get("presence")))

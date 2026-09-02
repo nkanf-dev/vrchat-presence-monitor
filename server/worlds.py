@@ -597,7 +597,10 @@ class DiscoveryService:
         with self.store.lock, self.store.connection() as db:
             self.store._require_tenant(db, tenant_id)
             _require_filter_ids(db, tenant_id, friend_id=friend_id)
-            friend_clauses = ["f.tenant_id=?"]
+            friend_clauses = [
+                "f.tenant_id=?",
+                "substr(f.id,1,4) NOT IN ('not_','frq_')",
+            ]
             friend_params: list[Any] = [tenant_id]
             if friend_id:
                 friend_clauses.append("f.id=?")

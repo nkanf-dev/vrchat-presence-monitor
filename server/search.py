@@ -64,7 +64,8 @@ class SearchService:
             COALESCE(a.note,'') AS note,COALESCE(a.pinned,0) AS pinned
             FROM friends f LEFT JOIN friend_annotations a
               ON a.tenant_id=f.tenant_id AND a.friend_id=f.id
-            WHERE f.tenant_id=? AND (
+            WHERE f.tenant_id=?
+            AND substr(f.id,1,4) NOT IN ('not_','frq_') AND (
                 f.id=? OR f.username LIKE ? ESCAPE '\\'
                 OR f.display_name LIKE ? ESCAPE '\\'
                 OR a.note LIKE ? ESCAPE '\\'
@@ -212,7 +213,8 @@ class SearchService:
             e.new_status,e.location,e.platform,f.display_name,f.username
             FROM status_events e JOIN friends f
               ON f.tenant_id=e.tenant_id AND f.id=e.friend_id
-            WHERE e.tenant_id=? AND (
+            WHERE e.tenant_id=?
+            AND substr(e.friend_id,1,4) NOT IN ('not_','frq_') AND (
                 e.client_event_id=? OR e.friend_id=?
                 OR f.display_name LIKE ? ESCAPE '\\'
                 OR f.username LIKE ? ESCAPE '\\'

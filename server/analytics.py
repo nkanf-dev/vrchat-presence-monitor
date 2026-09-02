@@ -268,6 +268,7 @@ class AnalyticsService:
                 for row in db.execute(
                     f"""SELECT id,username,display_name,is_self,status,location{avatar_column}
                     FROM friends WHERE tenant_id=?
+                    AND substr(id,1,4) NOT IN ('not_','frq_')
                     ORDER BY is_self DESC,CASE WHEN status='offline' THEN 1 ELSE 0 END,
                     display_name COLLATE NOCASE""",
                     (tenant_id,),
@@ -283,10 +284,12 @@ class AnalyticsService:
                         ) AS rank
                         FROM status_events e
                         WHERE e.tenant_id=? AND e.occurred_at<?
+                        AND substr(e.friend_id,1,4) NOT IN ('not_','frq_')
                     ),windowed AS (
                         SELECT {event_select}
                         FROM status_events e
                         WHERE e.tenant_id=? AND e.occurred_at>=? AND e.occurred_at<?
+                        AND substr(e.friend_id,1,4) NOT IN ('not_','frq_')
                     )
                     SELECT {event_columns} FROM windowed
                     UNION ALL
@@ -317,10 +320,12 @@ class AnalyticsService:
                         ) AS rank
                         FROM friend_tracking_events
                         WHERE tenant_id=? AND occurred_at<?
+                        AND substr(friend_id,1,4) NOT IN ('not_','frq_')
                     ),windowed AS (
                         SELECT event_id,friend_id,tracked,occurred_at,source
                         FROM friend_tracking_events
                         WHERE tenant_id=? AND occurred_at>=? AND occurred_at<?
+                        AND substr(friend_id,1,4) NOT IN ('not_','frq_')
                     )
                     SELECT event_id,friend_id,tracked,occurred_at,source FROM windowed
                     UNION ALL

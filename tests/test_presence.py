@@ -1,9 +1,17 @@
 import unittest
 
-from vrchat_monitor.vrchat import presence_fields
+from vrchat_monitor.vrchat import event_to_friend, presence_fields
 
 
 class PresenceMappingTests(unittest.TestCase):
+    def test_pipeline_notification_ids_are_not_projected_as_players(self):
+        self.assertIsNone(event_to_friend({"type": "hide-notification", "content": "not_deadbeef"}))
+        self.assertIsNone(event_to_friend({"content": {"id": "frq_deadbeef"}}))
+        self.assertEqual(
+            event_to_friend({"content": {"id": "usr_alice", "displayName": "Alice"}})["id"],
+            "usr_alice",
+        )
+
     def test_offline_presence_is_explicitly_offline(self):
         result = presence_fields({"status": "join me", "world": "offline", "instance": "offline"})
         self.assertEqual(result["status"], "join me")

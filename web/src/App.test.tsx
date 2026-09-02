@@ -117,7 +117,7 @@ describe('product state machine', () => {
     ]);
   });
 
-  it('renders exactly four desktop and mobile product areas', async () => {
+  it('renders the five desktop and mobile product areas', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
       if (path === '/v1/me') {
@@ -160,11 +160,12 @@ describe('product state machine', () => {
 
     const desktop = await screen.findByRole('navigation', { name: '主要导航' });
     const mobile = screen.getByRole('navigation', { name: '移动端主要导航' });
-    expect(within(desktop).getAllByRole('link')).toHaveLength(4);
-    expect(within(mobile).getAllByRole('link')).toHaveLength(4);
+    expect(within(desktop).getAllByRole('link')).toHaveLength(5);
+    expect(within(mobile).getAllByRole('link')).toHaveLength(5);
     expect(within(desktop).getAllByRole('link').map((link) => link.textContent)).toEqual([
       '在线',
       '玩家',
+      '仪表盘',
       '分析',
       '更多',
     ]);
@@ -174,9 +175,8 @@ describe('product state machine', () => {
 
     await user.click(within(desktop).getByRole('link', { name: '分析' }));
     const analysis = await screen.findByRole('navigation', { name: '分析页面' });
-    expect(within(analysis).getAllByRole('link')).toHaveLength(4);
+    expect(within(analysis).getAllByRole('link')).toHaveLength(3);
     expect(within(analysis).getByRole('link', { name: '世界发现' })).toBeVisible();
-    expect(within(analysis).getByRole('link', { name: '自定义图表' })).toBeVisible();
     expect(within(analysis).getByRole('link', { name: '每日在线' })).toHaveAttribute(
       'aria-current',
       'page',

@@ -397,6 +397,8 @@ export const dashboardPanelKindSchema = z.enum([
   'daily-changes',
   'friend-heatmap',
   'world-ranking',
+  'platform-breakdown',
+  'collection-coverage',
 ]);
 
 export const dashboardPanelSchema = z.object({
@@ -410,6 +412,11 @@ export const dashboardPanelSchema = z.object({
   range_days: z.union([z.literal(0), z.literal(1), z.literal(7), z.literal(30), z.literal(90)]).default(0),
   limit: z.number().int().min(3).max(30).default(10),
   include_self: z.boolean().default(true),
+  friend_ids: z.array(z.string().startsWith('usr_')).max(50).default([]),
+  statuses: z.array(z.string()).max(10).default([]),
+  platforms: z.array(z.string()).max(10).default([]),
+  world_ids: z.array(z.string().startsWith('wrld_')).max(50).default([]),
+  world_tag: z.string().max(160).default(''),
 }).refine((panel) => panel.x + panel.w <= 12, { message: 'panel exceeds grid' });
 
 export const dashboardDocumentSchema = z.object({
@@ -425,6 +432,56 @@ const dashboardSchema = z.object({
   updated_at: z.string(),
   document: dashboardDocumentSchema,
 });
+
+export const dashboardPanelDataSchema = z.object({
+  kind: dashboardPanelKindSchema,
+  error: z.string().optional(),
+  value: z.number().optional(),
+  detail: z.string().optional(),
+  ratio: z.number().optional(),
+  observed_minutes: z.number().optional(),
+  expected_minutes: z.number().optional(),
+  items: z.array(z.record(z.string(), z.unknown())).optional(),
+  rows: z.array(z.record(z.string(), z.unknown())).optional(),
+}).passthrough();
+
+const dashboardShareSchema = z.object({
+  enabled: z.boolean(),
+  id: z.string().optional(),
+  title: z.string().optional(),
+  protected: z.boolean().optional(),
+  source_revision: z.string().optional(),
+  created_at: z.string().optional(),
+  updated_at: z.string().optional(),
+  access_total: z.number().int().nonnegative().optional(),
+  last_access: z.string().nullable().optional(),
+});
+
+const dashboardShareAuditSchema = z.object({
+  items: z.array(z.object({
+    id: z.number().int(),
+    occurred_at: z.string(),
+    event_type: z.string(),
+    outcome: z.string(),
+    visitor_hash: z.string(),
+    device_class: z.string(),
+  })),
+  total: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+
+const publicDashboardSchema = z.union([
+  z.object({ locked: z.literal(true), title: z.string(), protected: z.boolean() }),
+  z.object({
+    locked: z.literal(false),
+    id: z.string(),
+    title: z.string(),
+    published_at: z.string(),
+    document: dashboardDocumentSchema,
+    data: z.record(z.string(), dashboardPanelDataSchema),
+  }),
+]);
 
 const worldLibraryItemSchema = worldInfoSchema.extend({
   last_observed: z.string(),
@@ -535,6 +592,10 @@ export type DashboardPanelKind = z.infer<typeof dashboardPanelKindSchema>;
 export type DashboardPanel = z.infer<typeof dashboardPanelSchema>;
 export type DashboardDocument = z.infer<typeof dashboardDocumentSchema>;
 export type Dashboard = z.infer<typeof dashboardSchema>;
+export type DashboardPanelData = z.infer<typeof dashboardPanelDataSchema>;
+export type DashboardShare = z.infer<typeof dashboardShareSchema>;
+export type DashboardShareAudit = z.infer<typeof dashboardShareAuditSchema>;
+export type PublicDashboard = z.infer<typeof publicDashboardSchema>;
 export type WorldLibraryItem = z.infer<typeof worldLibraryItemSchema>;
 export type WorldLibrary = z.infer<typeof worldLibrarySchema>;
 export type DiscoveryWorld = z.infer<typeof discoveryWorldSchema>;
@@ -892,6 +953,38 @@ export const updateDashboard = (value: Pick<Dashboard, 'revision' | 'document'>)
   request('/v1/dashboard', dashboardSchema, {
     method: 'PUT',
     body: JSON.stringify(value),
+  });
+
+export const getDashboardPanelData = (panel: DashboardPanel, globalRangeDays: DashboardDocument['range_days']) =>
+  request('/v1/dashboard/query', dashboardPanelDataSchema, {
+    method: 'POST',
+    body: JSON.stringify({ panel, global_range_days: globalRangeDays }),
+  });
+
+export const getDashboardShare = () => request('/v1/dashboard/share', dashboardShareSchema);
+
+export const publishDashboardShare = (password: string) =>
+  request('/v1/dashboard/share', dashboardShareSchema, {
+    method: 'PUT',
+    body: JSON.stringify({ password }),
+  });
+
+export const revokeDashboardShare = () =>
+  request('/v1/dashboard/share', z.object({ ok: z.literal(true), revoked: z.boolean() }), {
+    method: 'DELETE',
+    body: JSON.stringify({}),
+  });
+
+export const getDashboardShareAudit = (limit = 50, offset = 0) =>
+  request(`/v1/dashboard/share/audit?limit=${limit}&offset=${offset}`, dashboardShareAuditSchema);
+
+export const getPublicDashboard = (shareId: string) =>
+  request(`/v1/public/dashboard/${encodeURIComponent(shareId)}`, publicDashboardSchema);
+
+export const unlockPublicDashboard = (shareId: string, password: string) =>
+  request(`/v1/public/dashboard/${encodeURIComponent(shareId)}/unlock`, z.object({ ok: z.literal(true) }), {
+    method: 'POST',
+    body: JSON.stringify({ password }),
   });
 
 export const getWorldLibrary = (options: {

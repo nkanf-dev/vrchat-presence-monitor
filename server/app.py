@@ -6,6 +6,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Type, TypeVar
 
@@ -48,6 +49,9 @@ from .schemas import (
     AnnotationRequest,
     BootstrapRequest,
     DashboardPutRequest,
+    DashboardQueryRequest,
+    DashboardSharePutRequest,
+    DashboardShareUnlockRequest,
     LoginRequest,
     PreferenceRequest,
     TagRequest,
@@ -164,6 +168,84 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     limiter = LoginRateLimiter(config.login_attempts, config.login_window_seconds)
     collector_limiter = RequestRateLimiter(config.collector_requests_per_minute, 60)
     import_limiter = RequestRateLimiter(config.import_requests, config.import_window_seconds)
+    share_unlock_limiter = LoginRateLimiter(5, 15 * 60)
+
+    def device_class(request: Request) -> str:
+        value = str(request.headers.get("user-agent") or "").lower()
+        if "ipad" in value or "tablet" in value:
+            return "tablet"
+        if "mobile" in value or "android" in value or "iphone" in value:
+            return "mobile"
+        return "desktop" if value else "unknown"
+
+    def panel_data(tenant_id: str, panel: dict[str, Any], global_range_days: int) -> dict[str, Any]:
+        kind = str(panel["kind"])
+        range_days = int(panel.get("range_days") or global_range_days)
+        friend_ids = [str(value) for value in panel.get("friend_ids", [])]
+        statuses = [str(value) for value in panel.get("statuses", [])]
+        platforms = [str(value) for value in panel.get("platforms", [])]
+        include_self = bool(panel.get("include_self", True))
+        limit = int(panel.get("limit") or 10)
+        if kind in {"online-now", "tracked-count", "status-breakdown", "platform-breakdown"}:
+            current = database.dashboard_current(
+                tenant_id,
+                friend_ids=friend_ids,
+                statuses=statuses,
+                platforms=platforms,
+                include_self=include_self,
+            )
+            if kind in {"online-now", "tracked-count"}:
+                value = current["online_count"] if kind == "online-now" else current["tracked_count"]
+                detail = f"{current['tracked_count']} 位筛选对象" if kind == "online-now" else f"{current['online_count']} 位当前在线"
+                return {"kind": kind, "value": value, "detail": detail}
+            counts = current["status_counts"] if kind == "status-breakdown" else current["platform_counts"]
+            return {"kind": kind, "items": [{"name": name, "value": value} for name, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]}
+        if kind in {"online-ranking", "daily-changes"}:
+            result = analytics.stats(tenant_id, range_days)
+            if kind == "daily-changes":
+                return {"kind": kind, "items": result["daily_changes"]}
+            allowed = set(friend_ids)
+            items = [item for item in result["online_hours_all"] if not allowed or item["id"] in allowed]
+            return {"kind": kind, "items": items[:limit]}
+        if kind == "friend-heatmap":
+            today = datetime.now(timezone.utc).date()
+            start = today - timedelta(days=max(0, range_days - 1))
+            result = analytics.presence_overview(
+                tenant_id, today.isoformat(), range_days, start.isoformat(), today.isoformat()
+            )
+            allowed = set(friend_ids)
+            rows = [
+                row for row in result["heatmap"]
+                if (include_self or not row["is_self"]) and (not allowed or row["id"] in allowed)
+            ]
+            rows.sort(key=lambda row: -sum(float(cell.get("online_minutes") or 0) for cell in row["cells"]))
+            return {"kind": kind, "rows": rows[:limit]}
+        if kind == "world-ranking":
+            discovery_days = range_days if range_days in {1, 7, 30} else 30
+            selected_friend = friend_ids[0] if len(friend_ids) == 1 else ""
+            result = discovery.discover(
+                tenant_id,
+                discovery_days,
+                friend_id=selected_friend,
+                world_tag=str(panel.get("world_tag") or ""),
+                include_self=include_self,
+                limit=max(limit, 30),
+                offset=0,
+            )
+            world_ids = set(str(value) for value in panel.get("world_ids", []))
+            items = [item for item in result["hot"] if not world_ids or item["world_id"] in world_ids]
+            return {"kind": kind, "items": items[:limit]}
+        if kind == "collection-coverage":
+            today = datetime.now(timezone.utc).date()
+            start = today - timedelta(days=max(0, range_days - 1))
+            result = analytics.coverage_overview(tenant_id, start.isoformat(), today.isoformat())
+            return {
+                "kind": kind,
+                "ratio": result["ratio"],
+                "observed_minutes": result["observed_minutes"],
+                "expected_minutes": result["expected_minutes"],
+            }
+        raise ValueError("不支持的仪表盘图表")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -180,7 +262,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     app = FastAPI(
         title="Presence Monitor Hosted API",
-        version="0.3.0-beta.5",
+        version="0.3.0-beta.6",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -870,6 +952,131 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             payload.document.model_dump(mode="json"),
             payload.revision,
         )
+
+    @app.post("/v1/dashboard/query")
+    async def dashboard_query(
+        request: Request,
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        payload = await _read_model(request, DashboardQueryRequest, 32 * 1024)
+        try:
+            return await run_in_threadpool(
+                panel_data,
+                auth.row["tenant_id"],
+                payload.panel.model_dump(mode="json"),
+                payload.global_range_days,
+            )
+        except (KeyError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/v1/dashboard/share")
+    async def dashboard_share(auth: Authenticated = Depends(viewer)) -> dict[str, Any]:
+        return await run_in_threadpool(organization.get_dashboard_share, auth.row["tenant_id"])
+
+    @app.put("/v1/dashboard/share")
+    async def publish_dashboard_share(
+        request: Request,
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        payload = await _read_model(request, DashboardSharePutRequest, 2048)
+        return await organization_call(
+            organization.publish_dashboard_share, auth.row["tenant_id"], payload.password
+        )
+
+    @app.delete("/v1/dashboard/share")
+    async def revoke_dashboard_share(
+        request: Request,
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        revoked = await run_in_threadpool(organization.revoke_dashboard_share, auth.row["tenant_id"])
+        return {"ok": True, "revoked": revoked}
+
+    @app.get("/v1/dashboard/share/audit")
+    async def dashboard_share_audit(
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        auth: Authenticated = Depends(viewer),
+    ) -> dict[str, Any]:
+        return await run_in_threadpool(
+            organization.dashboard_share_audit,
+            auth.row["tenant_id"],
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get("/v1/public/dashboard/{share_id}")
+    async def public_dashboard(
+        request: Request,
+        share_id: str = PathParam(min_length=16, max_length=96),
+    ) -> dict[str, Any]:
+        packed = str(request.cookies.get("presence_share") or "")
+        token = packed.split(".", 1)[1] if packed.startswith(f"{share_id}.") else ""
+        try:
+            shared = await run_in_threadpool(
+                organization.public_dashboard_share,
+                share_id,
+                token,
+                client_address(request, config),
+                device_class(request),
+            )
+        except OrganizationNotFound as error:
+            raise HTTPException(status_code=404, detail="共享仪表盘不存在") from error
+        if shared.get("locked"):
+            return shared
+        tenant_id = str(shared.pop("tenant_id"))
+        document = shared["document"]
+        data: dict[str, Any] = {}
+        for panel in document.get("panels", []):
+            try:
+                data[str(panel["id"])] = await run_in_threadpool(
+                    panel_data, tenant_id, panel, int(document.get("range_days") or 7)
+                )
+            except (KeyError, ValueError):
+                data[str(panel.get("id") or "")] = {"kind": str(panel.get("kind") or ""), "error": "这张图表暂时无法载入"}
+        return {**shared, "data": data}
+
+    @app.post("/v1/public/dashboard/{share_id}/unlock")
+    async def unlock_public_dashboard(
+        request: Request,
+        response: Response,
+        share_id: str = PathParam(min_length=16, max_length=96),
+    ) -> dict[str, bool]:
+        require_same_origin(request)
+        address = client_address(request, config)
+        limiter_key = f"{share_id}:{address}"
+        if not share_unlock_limiter.allowed(limiter_key):
+            raise HTTPException(
+                status_code=429, detail="尝试次数过多，请稍后再试", headers={"Retry-After": "900"}
+            )
+        payload = await _read_model(request, DashboardShareUnlockRequest, 2048)
+        try:
+            token = await run_in_threadpool(
+                organization.unlock_dashboard_share,
+                share_id,
+                payload.password,
+                address,
+                device_class(request),
+            )
+        except OrganizationNotFound as error:
+            raise HTTPException(status_code=404, detail="共享仪表盘不存在") from error
+        if token is None:
+            share_unlock_limiter.fail(limiter_key)
+            raise HTTPException(status_code=401, detail="密码不正确")
+        share_unlock_limiter.clear(limiter_key)
+        secure = request_is_secure(request, config)
+        response.set_cookie(
+            key="presence_share",
+            value=f"{share_id}.{token}",
+            max_age=24 * 60 * 60,
+            path="/",
+            secure=secure,
+            httponly=True,
+            samesite="lax",
+        )
+        return {"ok": True}
 
     @app.get("/v1/events")
     def events(

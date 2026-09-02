@@ -2,6 +2,7 @@ import {
   Activity,
   ChartNoAxesCombined,
   Ellipsis,
+  LayoutDashboard,
   RefreshCw,
   Users,
 } from 'lucide-react';
@@ -17,6 +18,7 @@ import { GlobalSearch } from './GlobalSearch';
 const items = [
   { id: 'online', label: '在线', icon: Activity },
   { id: 'people', label: '玩家', icon: Users },
+  { id: 'dashboard', label: '仪表盘', icon: LayoutDashboard },
   { id: 'analysis', label: '分析', icon: ChartNoAxesCombined },
   { id: 'more', label: '更多', icon: Ellipsis },
 ] as const satisfies ReadonlyArray<{ id: Area; label: string; icon: typeof Activity }>;

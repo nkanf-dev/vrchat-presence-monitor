@@ -45,6 +45,11 @@ const dashboard: Dashboard = {
       range_days: 0,
       limit: 10,
       include_self: true,
+      friend_ids: [],
+      statuses: [],
+      platforms: [],
+      world_ids: [],
+      world_tag: '',
     }],
   },
 };

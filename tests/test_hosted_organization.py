@@ -189,6 +189,37 @@ class HostedOrganizationTests(unittest.TestCase):
         )
         self.assertEqual(duplicate.status_code, 422, duplicate.text)
 
+    def test_dashboard_share_password_and_access_audit(self):
+        published = self.client.put(
+            "/v1/dashboard/share",
+            headers=self.mutation_headers(),
+            json={"password": "friends-only"},
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+        share_id = published.json()["id"]
+
+        locked = self.client.get(f"/v1/public/dashboard/{share_id}")
+        self.assertEqual(locked.status_code, 200, locked.text)
+        self.assertTrue(locked.json()["locked"])
+        rejected = self.client.post(
+            f"/v1/public/dashboard/{share_id}/unlock",
+            headers=self.mutation_headers(),
+            json={"password": "wrong"},
+        )
+        self.assertEqual(rejected.status_code, 401, rejected.text)
+        unlocked = self.client.post(
+            f"/v1/public/dashboard/{share_id}/unlock",
+            headers=self.mutation_headers(),
+            json={"password": "friends-only"},
+        )
+        self.assertEqual(unlocked.status_code, 200, unlocked.text)
+        shared = self.client.get(f"/v1/public/dashboard/{share_id}")
+        self.assertEqual(shared.status_code, 200, shared.text)
+        self.assertFalse(shared.json()["locked"])
+        audit = self.client.get("/v1/dashboard/share/audit").json()
+        self.assertGreaterEqual(audit["total"], 3)
+        self.assertTrue(all("password" not in item for item in audit["items"]))
+
 
 if __name__ == "__main__":
     unittest.main()

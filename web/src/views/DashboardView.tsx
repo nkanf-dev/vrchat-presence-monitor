@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Share2,
   SlidersHorizontal,
   Trash2,
   UsersRound,
@@ -31,10 +32,12 @@ import {
   type DashboardPanelKind,
   dashboardDocumentSchema,
   getDashboard,
+  getFriends,
   updateDashboard,
 } from '../api';
 import { DashboardPanel } from '../components/DashboardPanel';
-import { formatDateTime } from '../format';
+import { DashboardShareDialog } from '../components/DashboardShareDialog';
+import { formatDateTime, statusLabel } from '../format';
 
 type HashPatch = Record<string, string | number | null>;
 type CatalogItem = {
@@ -53,6 +56,8 @@ const catalog: CatalogItem[] = [
   { kind: 'daily-changes', title: '每日状态变化', description: '每天记录到的状态变化趋势', size: { w: 6, h: 6 }, icon: LineChart },
   { kind: 'friend-heatmap', title: '好友时段热力', description: '每位好友在一天各时段的在线比例', size: { w: 12, h: 9 }, icon: SlidersHorizontal },
   { kind: 'world-ranking', title: '热门世界', description: '好友游玩时间最多的世界', size: { w: 8, h: 8 }, icon: BarChart3 },
+  { kind: 'platform-breakdown', title: '平台分布', description: '当前设备平台的人数分布', size: { w: 6, h: 7 }, icon: Donut },
+  { kind: 'collection-coverage', title: '数据覆盖率', description: '所选时段内实际采集覆盖情况', size: { w: 4, h: 5 }, icon: LineChart },
 ];
 
 const catalogByKind = new Map(catalog.map((item) => [item.kind, item]));
@@ -117,7 +122,7 @@ export function DashboardView({
   onUpdateParameters: (values: HashPatch, replace?: boolean) => void;
 }) {
   const queryClient = useQueryClient();
-  const { width, containerRef, mounted } = useContainerWidth();
+  const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true });
   const mobile = mounted && width < 720;
   const config = useQuery({
     queryKey: ['dashboard-config'],
@@ -129,10 +134,18 @@ export function DashboardView({
   const [dirty, setDirty] = useState(false);
   const [editing, setEditing] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [editingPanelId, setEditingPanelId] = useState<string | null>(null);
+  const [filterSearch, setFilterSearch] = useState('');
   const [conflict, setConflict] = useState<Dashboard | null>(null);
   const [recoveredDraft, setRecoveredDraft] = useState(false);
   const loadedRevision = useRef<string | null | undefined>(undefined);
+  const filterFriends = useQuery({
+    queryKey: ['friends', 'dashboard-filter'],
+    queryFn: () => getFriends({ limit: 200, offset: 0 }),
+    enabled: editingPanelId !== null,
+    staleTime: 60_000,
+  });
 
   useEffect(() => {
     if (!config.data || loadedRevision.current === config.data.revision || dirty) return;
@@ -271,6 +284,11 @@ export function DashboardView({
           range_days: item.kind === 'world-ranking' ? 30 : 0,
           limit: 10,
           include_self: true,
+          friend_ids: [],
+          statuses: [],
+          platforms: [],
+          world_ids: [],
+          world_tag: '',
         }],
       };
     });
@@ -387,6 +405,9 @@ export function DashboardView({
         <button type="button" className="button button-secondary" onClick={() => setLibraryOpen(true)} disabled={document.panels.length >= 20}>
           <Plus size={16} aria-hidden="true" />添加图表
         </button>
+        <button type="button" className="button button-secondary" onClick={() => setShareOpen(true)}>
+          <Share2 size={16} aria-hidden="true" />分享
+        </button>
         <button type="button" className="button button-primary" disabled={!dirty || save.isPending} onClick={() => save.mutate({ revision, document })}>
           <Save size={16} aria-hidden="true" />{save.isPending ? '保存中…' : '保存'}
         </button>
@@ -444,7 +465,7 @@ export function DashboardView({
             width={width}
             layout={layout}
             gridConfig={{ cols: mobile ? 1 : 12, rowHeight: mobile ? 34 : 36, margin: mobile ? [0, 12] : [12, 12], containerPadding: [0, 0] }}
-            dragConfig={{ enabled: editing && !mobile, handle: '.dashboard-panel-drag', cancel: 'button,input,select,a' }}
+            dragConfig={{ enabled: editing && !mobile, bounded: true, handle: '.dashboard-panel-drag' }}
             resizeConfig={{ enabled: editing && !mobile, handles: ['se'] }}
             compactor={verticalCompactor}
             onLayoutChange={applyLayout}
@@ -514,9 +535,70 @@ export function DashboardView({
             {['online-ranking', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
               <label><span>显示数量</span><input type="number" min={3} max={30} value={editingPanel.limit} onChange={(event) => updatePanel(editingPanel.id, { limit: Math.max(3, Math.min(30, Number(event.target.value))) })} /></label>
             )}
-            {['friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
+            {['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown', 'friend-heatmap', 'world-ranking'].includes(editingPanel.kind) && (
               <label className="dashboard-checkbox"><input type="checkbox" checked={editingPanel.include_self} onChange={(event) => updatePanel(editingPanel.id, { include_self: event.target.checked })} /><span>包含自己的账号</span></label>
             )}
+            {editingPanel.kind !== 'daily-changes' && (
+              <fieldset className="dashboard-filter-group">
+                <legend>玩家</legend>
+                <input
+                  value={filterSearch}
+                  placeholder="搜索玩家"
+                  aria-label="搜索可筛选玩家"
+                  onChange={(event) => setFilterSearch(event.target.value)}
+                />
+                <div className="dashboard-filter-options">
+                  {(filterFriends.data?.items ?? [])
+                    .filter((friend) => !filterSearch || `${friend.display_name} ${friend.username}`.toLowerCase().includes(filterSearch.toLowerCase()))
+                    .map((friend) => {
+                      const checked = editingPanel.friend_ids.includes(friend.id);
+                      return <label key={friend.id} className="dashboard-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!checked && editingPanel.kind !== 'world-ranking' && editingPanel.friend_ids.length >= 50}
+                          onChange={(event) => updatePanel(editingPanel.id, {
+                            friend_ids: event.target.checked
+                              ? editingPanel.kind === 'world-ranking'
+                                ? [friend.id]
+                                : [...editingPanel.friend_ids, friend.id].slice(0, 50)
+                              : editingPanel.friend_ids.filter((id) => id !== friend.id),
+                          })}
+                        />
+                        <span>{friend.display_name || friend.username}{friend.is_self ? '（自己）' : ''}</span>
+                      </label>;
+                    })}
+                </div>
+                <small>{editingPanel.friend_ids.length ? `已选择 ${editingPanel.friend_ids.length} 位；不选择时使用全部玩家` : '当前使用全部玩家'}{editingPanel.kind === 'world-ranking' ? '；世界排行一次筛选一位玩家' : ''}</small>
+              </fieldset>
+            )}
+            {['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown'].includes(editingPanel.kind) && (
+              <fieldset className="dashboard-filter-group dashboard-filter-inline">
+                <legend>状态</legend>
+                {['active', 'join me', 'ask me', 'busy', 'offline'].map((status) => <label key={status} className="dashboard-checkbox">
+                  <input type="checkbox" checked={editingPanel.statuses.includes(status)} onChange={(event) => updatePanel(editingPanel.id, {
+                    statuses: event.target.checked ? [...editingPanel.statuses, status] : editingPanel.statuses.filter((value) => value !== status),
+                  })} /><span>{statusLabel(status)}</span>
+                </label>)}
+              </fieldset>
+            )}
+            {['online-now', 'tracked-count', 'status-breakdown', 'platform-breakdown'].includes(editingPanel.kind) && (
+              <fieldset className="dashboard-filter-group dashboard-filter-inline">
+                <legend>平台</legend>
+                {[...new Set((filterFriends.data?.items ?? []).map((friend) => friend.platform).filter(Boolean))].sort().map((platform) => <label key={platform} className="dashboard-checkbox">
+                  <input type="checkbox" checked={editingPanel.platforms.includes(platform)} onChange={(event) => updatePanel(editingPanel.id, {
+                    platforms: event.target.checked ? [...editingPanel.platforms, platform] : editingPanel.platforms.filter((value) => value !== platform),
+                  })} /><span>{platform}</span>
+                </label>)}
+              </fieldset>
+            )}
+            {editingPanel.kind === 'world-ranking' && <>
+              <label><span>世界标签</span><input value={editingPanel.world_tag} placeholder="例如 game" onChange={(event) => updatePanel(editingPanel.id, { world_tag: event.target.value })} /></label>
+              <label><span>限定世界 ID（逗号分隔）</span><input value={editingPanel.world_ids.join(', ')} placeholder="wrld_..." onChange={(event) => updatePanel(editingPanel.id, {
+                world_ids: event.target.value.split(',').map((value) => value.trim()).filter((value) => value.startsWith('wrld_')).slice(0, 50),
+              })} /></label>
+              {editingPanel.friend_ids.length > 1 && <small className="dashboard-form-note">世界排行一次聚合一位玩家；当前将使用全部玩家。保留一位即可查看其个人世界排行。</small>}
+            </>}
             <div className="dashboard-dialog-actions">
               <button type="button" className="button button-danger" onClick={() => removePanel(editingPanel.id)}><Trash2 size={16} aria-hidden="true" />删除图表</button>
               <button type="submit" className="button button-primary"><Check size={16} aria-hidden="true" />完成</button>
@@ -524,6 +606,7 @@ export function DashboardView({
           </form>
         </WorkspaceDialog>
       )}
+      {shareOpen && <DashboardShareDialog onClose={() => setShareOpen(false)} dashboardDirty={dirty} />}
     </>
   );
 }

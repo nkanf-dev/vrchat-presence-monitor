@@ -54,6 +54,8 @@ class DashboardPanelRequest(StrictModel):
         "daily-changes",
         "friend-heatmap",
         "world-ranking",
+        "platform-breakdown",
+        "collection-coverage",
     ]
     title: str = Field(default="", max_length=80)
     x: int = Field(ge=0, le=11)
@@ -63,11 +65,20 @@ class DashboardPanelRequest(StrictModel):
     range_days: Literal[0, 1, 7, 30, 90] = 0
     limit: int = Field(default=10, ge=3, le=30)
     include_self: bool = True
+    friend_ids: list[str] = Field(default_factory=list, max_length=50)
+    statuses: list[str] = Field(default_factory=list, max_length=10)
+    platforms: list[str] = Field(default_factory=list, max_length=10)
+    world_ids: list[str] = Field(default_factory=list, max_length=50)
+    world_tag: str = Field(default="", max_length=160)
 
     @model_validator(mode="after")
     def validate_grid_bounds(self) -> "DashboardPanelRequest":
         if self.x + self.w > 12:
             raise ValueError("dashboard panel exceeds the 12-column grid")
+        if any(not value.startswith("usr_") for value in self.friend_ids):
+            raise ValueError("dashboard friend filters must use VRChat user ids")
+        if any(not value.startswith("wrld_") for value in self.world_ids):
+            raise ValueError("dashboard world filters must use VRChat world ids")
         return self
 
 
@@ -89,6 +100,19 @@ class DashboardDocumentRequest(StrictModel):
 class DashboardPutRequest(StrictModel):
     revision: str | None = Field(default=None, max_length=256)
     document: DashboardDocumentRequest
+
+
+class DashboardQueryRequest(StrictModel):
+    panel: DashboardPanelRequest
+    global_range_days: Literal[1, 7, 30, 90] = 7
+
+
+class DashboardSharePutRequest(StrictModel):
+    password: str = Field(default="", max_length=256)
+
+
+class DashboardShareUnlockRequest(StrictModel):
+    password: str = Field(default="", max_length=256)
 
 
 class BootstrapRequest(StrictModel):

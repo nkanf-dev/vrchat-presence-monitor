@@ -33,6 +33,7 @@ import { DiscoveryView } from './views/DiscoveryView';
 import { WorldsView } from './views/WorldsView';
 
 const DashboardView = lazy(() => import('./views/DashboardView').then((module) => ({ default: module.DashboardView })));
+const SharedDashboardView = lazy(() => import('./views/SharedDashboardView').then((module) => ({ default: module.SharedDashboardView })));
 
 function InitialContentError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
@@ -350,7 +351,7 @@ function Dashboard({ identity }: { identity: { tenant_id: string; name: string }
   );
 }
 
-export function App() {
+function AuthenticatedApp() {
   const queryClient = useQueryClient();
   const [requiresTwoFactor, setRequiresTwoFactor] = useState(false);
   const me = useQuery({ queryKey: ['me'], queryFn: getMe, retry: false, staleTime: 5 * 60_000 });
@@ -419,4 +420,10 @@ export function App() {
   }
 
   return <Dashboard identity={me.data.user} />;
+}
+
+export function App() {
+  const shared = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]{16,96})\/?$/);
+  if (shared?.[1]) return <Suspense fallback={<main className="shared-dashboard-state">正在打开仪表盘…</main>}><SharedDashboardView shareId={shared[1]} /></Suspense>;
+  return <AuthenticatedApp />;
 }

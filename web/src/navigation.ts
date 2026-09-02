@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
-export const areas = ['online', 'people', 'analysis', 'more'] as const;
+export const areas = ['online', 'people', 'dashboard', 'analysis', 'more'] as const;
 export type Area = (typeof areas)[number];
 
-export const analysisSections = ['daily', 'relationships', 'worlds', 'discover', 'dashboard'] as const;
+export const analysisSections = ['daily', 'relationships', 'worlds', 'discover'] as const;
 export type AnalysisSection = (typeof analysisSections)[number];
 
 export const moreSections = ['history', 'data', 'settings'] as const;
@@ -32,6 +32,7 @@ type RouteDetails = {
 export type Route =
   | ({ area: 'online' } & RouteDetails)
   | ({ area: 'people' } & RouteDetails)
+  | ({ area: 'dashboard' } & RouteDetails)
   | ({ area: 'analysis'; section: AnalysisSection } & RouteDetails)
   | ({ area: 'more'; section: MoreSection } & RouteDetails);
 
@@ -39,7 +40,7 @@ const legacyRoutes: Record<string, Route> = {
   overview: { area: 'online' },
   people: { area: 'people' },
   daily: { area: 'analysis', section: 'daily' },
-  dashboard: { area: 'analysis', section: 'dashboard' },
+  dashboard: { area: 'dashboard' },
   worlds: { area: 'analysis', section: 'worlds' },
   history: { area: 'more', section: 'history' },
   data: { area: 'more', section: 'data' },
@@ -132,8 +133,10 @@ export function parseRoute(parameters: URLSearchParams): Route {
 
   if (requestedArea === 'online') return { area: 'online', ...details };
   if (requestedArea === 'people') return { area: 'people', ...details };
+  if (requestedArea === 'dashboard') return { area: 'dashboard', ...details };
   if (requestedArea === 'analysis') {
     const requestedSection = parameters.get('section');
+    if (requestedSection === 'dashboard') return { area: 'dashboard', ...details };
     const section = analysisSections.includes(requestedSection as AnalysisSection)
       ? (requestedSection as AnalysisSection)
       : 'daily';
@@ -154,6 +157,7 @@ export function parseRoute(parameters: URLSearchParams): Route {
 export function routeToView(route: Route): View {
   if (route.area === 'online') return 'overview';
   if (route.area === 'people') return 'people';
+  if (route.area === 'dashboard') return 'dashboard';
   return route.section;
 }
 
@@ -167,6 +171,7 @@ export function routeForArea(area: Area, current: Route): Route {
   const details = copyDetails(current);
   if (area === 'online') return { area, ...details };
   if (area === 'people') return { area, ...details };
+  if (area === 'dashboard') return { area, ...details };
   if (area === 'analysis') {
     return {
       area,
@@ -185,6 +190,7 @@ export function routeForView(view: View, current: Route): Route {
   const details = copyDetails(current);
   if (view === 'overview') return { area: 'online', ...details };
   if (view === 'people') return { area: 'people', ...details };
+  if (view === 'dashboard') return { area: 'dashboard', ...details };
   if (analysisSections.includes(view as AnalysisSection)) {
     return { area: 'analysis', section: view as AnalysisSection, ...details };
   }
