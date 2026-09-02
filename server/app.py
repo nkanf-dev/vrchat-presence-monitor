@@ -239,7 +239,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "style-src-attr 'unsafe-inline'; "
             "img-src 'self' data: https://*.vrchat.cloud https://*.vrcdn.cloud; "
             "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; "
             "form-action 'self'; frame-ancestors 'none'"

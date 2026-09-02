@@ -88,8 +88,12 @@ class HostedHttpContractTests(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("default-src 'self'", response.headers["content-security-policy"])
-        self.assertNotIn("unsafe-inline", response.headers["content-security-policy"])
+        content_security_policy = response.headers["content-security-policy"]
+        self.assertIn("default-src 'self'", content_security_policy)
+        self.assertIn("script-src 'self'", content_security_policy)
+        self.assertNotIn("script-src 'self' 'unsafe-inline'", content_security_policy)
+        self.assertIn("style-src 'self'", content_security_policy)
+        self.assertIn("style-src-attr 'unsafe-inline'", content_security_policy)
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertEqual(response.headers["cross-origin-opener-policy"], "same-origin")
         self.assertEqual(response.headers["cache-control"], "no-store")
