@@ -36,11 +36,15 @@ class VRChatAuthService:
     def __init__(
         self,
         cipher: SessionCipher,
-        client_factory: Callable[[MemoryCredentialStore], VRChatClient] = VRChatClient,
+        client_factory: Callable[[MemoryCredentialStore], VRChatClient] | None = None,
         lifetime_seconds: int = 600,
+        proxy_url: str = "",
     ):
         self.cipher = cipher
-        self.client_factory = client_factory
+        self.proxy_url = str(proxy_url or "").strip()
+        self.client_factory = client_factory or (
+            lambda store: VRChatClient(store, proxy_url=self.proxy_url)
+        )
         self.lifetime_seconds = max(60, int(lifetime_seconds))
         self._pending: dict[str, PendingLogin] = {}
         self._lock = threading.Lock()

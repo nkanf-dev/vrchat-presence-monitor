@@ -157,9 +157,14 @@ def _cookie_value(header: str | None, name: str) -> str:
 
 
 class VRChatClient:
-    def __init__(self, credential_store: CredentialStore):
+    def __init__(
+        self,
+        credential_store: CredentialStore,
+        proxy_url: str | None = None,
+    ):
         self.credential_store = credential_store
         self.cookie = credential_store.load()
+        self.proxy_url = str(proxy_url or "").strip()
         self.auth_user: dict[str, Any] | None = None
         self.raw_sink: Callable[[dict[str, Any]], None] | None = None
         self._lock = threading.RLock()
@@ -198,17 +203,21 @@ class VRChatClient:
     def logged_in(self) -> bool:
         return bool(self.cookie)
 
-    @staticmethod
-    def _proxy_url() -> str | None:
+    def _proxy_url(self) -> str | None:
+        if self.proxy_url:
+            return self.proxy_url
         proxies = urllib.request.getproxies()
         return proxies.get("https") or proxies.get("http")
 
-    @staticmethod
-    def _open_url(request: urllib.request.Request, timeout: float):
+    def _open_url(self, request: urllib.request.Request, timeout: float):
         last_error: Exception | None = None
         for attempt in range(3):
             try:
-                proxies = urllib.request.getproxies()
+                proxies = (
+                    {"http": self.proxy_url, "https": self.proxy_url}
+                    if self.proxy_url
+                    else urllib.request.getproxies()
+                )
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
                 return opener.open(request, timeout=timeout)
             except urllib.error.HTTPError:

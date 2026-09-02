@@ -81,6 +81,8 @@ class Settings:
     hosted_collector_poll_seconds: int = 180
     hosted_collector_concurrency: int = 3
     hosted_collector_max_backoff_seconds: int = 1800
+    hosted_vrchat_login_proxy: str = ""
+    hosted_vrchat_proxy_overrides: str = ""
 
     def __post_init__(self) -> None:
         mode = self.cookie_secure.strip().lower()
@@ -166,4 +168,10 @@ class Settings:
             hosted_collector_max_backoff_seconds=int(
                 os.environ.get("HOSTED_COLLECTOR_MAX_BACKOFF_SECONDS", "1800")
             ),
+            hosted_vrchat_login_proxy=os.environ.get(
+                "HOSTED_VRCHAT_LOGIN_PROXY", ""
+            ).strip(),
+            hosted_vrchat_proxy_overrides=os.environ.get(
+                "HOSTED_VRCHAT_PROXY_OVERRIDES", ""
+            ).strip(),
         )

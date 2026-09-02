@@ -130,7 +130,19 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     )
     if config.hosted_vrchat_login and database.session_cipher is None:
         database.session_cipher = session_cipher
-    vrchat_auth = VRChatAuthService(session_cipher) if session_cipher else None
+    proxy_overrides = dict(
+        item.split("=", 1)
+        for item in config.hosted_vrchat_proxy_overrides.split(",")
+        if "=" in item and all(part.strip() for part in item.split("=", 1))
+    )
+    vrchat_auth = (
+        VRChatAuthService(
+            session_cipher,
+            proxy_url=config.hosted_vrchat_login_proxy,
+        )
+        if session_cipher
+        else None
+    )
     analytics = AnalyticsService(database)
     organization = OrganizationService(database)
     search = SearchService(database)
@@ -142,6 +154,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             poll_seconds=config.hosted_collector_poll_seconds,
             concurrency=config.hosted_collector_concurrency,
             max_backoff_seconds=config.hosted_collector_max_backoff_seconds,
+            proxy_overrides=proxy_overrides,
         )
         if config.hosted_vrchat_login
         else None

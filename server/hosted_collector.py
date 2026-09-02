@@ -294,10 +294,16 @@ class HostedCollectorManager:
         poll_seconds: int = 180,
         concurrency: int = 3,
         max_backoff_seconds: int = 1800,
+        proxy_overrides: dict[str, str] | None = None,
     ):
         self.store = store
         self.poll_seconds = max(90, int(poll_seconds))
         self.max_backoff_seconds = max(60, int(max_backoff_seconds))
+        self.proxy_overrides = {
+            str(tenant_id): str(proxy_url).strip()
+            for tenant_id, proxy_url in (proxy_overrides or {}).items()
+            if str(tenant_id).strip() and str(proxy_url).strip()
+        }
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, int(concurrency)), thread_name_prefix="hosted-vrchat"
         )
@@ -417,7 +423,10 @@ class HostedCollectorManager:
         if not cookie:
             return None
         credentials = MemoryCredentialStore(cookie)
-        client = VRChatClient(credentials)
+        client = VRChatClient(
+            credentials,
+            proxy_url=self.proxy_overrides.get(tenant_id),
+        )
         client.set_raw_sink(lambda fetch: self._raw_sink(tenant_id, fetch))
         session = _TenantSession(
             account=account,
