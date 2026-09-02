@@ -180,7 +180,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     app = FastAPI(
         title="Presence Monitor Hosted API",
-        version="0.3.0-beta.4",
+        version="0.3.0-beta.5",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
