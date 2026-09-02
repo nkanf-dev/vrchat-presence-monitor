@@ -69,7 +69,15 @@ class VRChatAuthService:
             raise ValueError("pending login expired")
         cookie = self.cipher.decrypt_pending(pending_id, pending.encrypted_cookie)
         client = self.client_factory(MemoryCredentialStore(cookie))
-        result = client.complete_2fa(cookie, code)
+        method = next(
+            (
+                candidate
+                for candidate in ("emailOtp", "totp", "otp")
+                if candidate in pending.methods
+            ),
+            pending.methods[0] if pending.methods else "totp",
+        )
+        result = client.complete_2fa(cookie, code, method)
         with self._lock:
             self._pending.pop(pending_id, None)
         return result

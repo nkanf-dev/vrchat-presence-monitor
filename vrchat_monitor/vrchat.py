@@ -4,6 +4,7 @@ import base64
 import hashlib
 import http.client
 import json
+import logging
 import os
 import random
 import re
@@ -25,6 +26,7 @@ API_BASE = "https://api.vrchat.cloud/api/1"
 PIPELINE_HOST = "pipeline.vrchat.cloud"
 USER_AGENT = "PicoWorksVRChatMonitor/0.1 (contact: local@localhost)"
 WORLD_ID_PATTERN = re.compile(r"wrld_[0-9a-f-]{36}", re.IGNORECASE)
+LOGGER = logging.getLogger("presence_monitor.vrchat")
 
 
 def secure_tls_context() -> ssl.SSLContext:
@@ -274,28 +276,46 @@ class VRChatClient:
             except Exception:
                 raw_detail = b""
             self._record_raw("GET", "/auth/user", error.code, error.headers.get("Content-Type", ""), raw_detail, str(error.reason))
+            LOGGER.warning("VRChat credential login rejected with HTTP %s", error.code)
             if error.code == 401:
                 raise VRChatError("账号或密码不正确", 401) from error
             raise VRChatError(f"登录失败：HTTP {error.code}", error.code) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             self._record_raw("GET", "/auth/user", None, error=str(error))
+            LOGGER.warning("VRChat credential login network failure: %s", type(error).__name__)
             raise VRChatError(f"网络连接失败：{error}") from error
 
         if parsed.get("requiresTwoFactorAuth"):
+            LOGGER.info(
+                "VRChat credential login requires verification methods=%s",
+                ",".join(map(str, parsed.get("requiresTwoFactorAuth") or ("totp",))),
+            )
             return VRChatLoginResult(
                 requires_2fa=True,
                 cookie=cookie,
                 methods=tuple(parsed.get("requiresTwoFactorAuth") or ("totp",)),
             )
         if not cookie:
+            LOGGER.warning("VRChat credential login returned no session cookie")
             raise VRChatError("登录响应没有返回会话，请稍后重试")
         return VRChatLoginResult(False, cookie, user=parsed)
 
-    def complete_2fa(self, cookie: str, code: str) -> VRChatLoginResult:
+    def complete_2fa(
+        self,
+        cookie: str,
+        code: str,
+        method: str = "totp",
+    ) -> VRChatLoginResult:
         if not cookie:
             raise VRChatError("登录会话已过期，请重新登录", 401)
+        normalized_method = str(method or "totp").strip().casefold()
+        verify_path = {
+            "emailotp": "/auth/twofactorauth/emailotp/verify",
+            "otp": "/auth/twofactorauth/otp/verify",
+            "totp": "/auth/twofactorauth/totp/verify",
+        }.get(normalized_method, "/auth/twofactorauth/totp/verify")
         parsed, new_cookie = self._request(
-            "POST", "/auth/twofactorauth/totp/verify", {"code": code}, cookie
+            "POST", verify_path, {"code": code}, cookie
         )
         if not isinstance(parsed, dict) or parsed.get("verified") is False:
             raise VRChatError("验证码不正确", 401)
