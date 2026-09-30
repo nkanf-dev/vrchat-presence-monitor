@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -173,7 +173,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Validate operational image platforms
         run: |
           cloudflared_image="$(docker compose --profile tunnel config --images | awk '/^cloudflare\/cloudflared:/ { print; exit }')"
@@ -192,7 +192,7 @@ jobs:
           if missing:
               raise SystemExit(f"cloudflared image is missing platforms: {sorted(missing)}")
           '
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           SOURCE_DATE_EPOCH: "0"
         with:
@@ -205,6 +205,33 @@ jobs:
           tags: presence-monitor:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Smoke test the production runtime
+        run: |
+          set -euo pipefail
+          container="$(docker run --detach --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+            --tmpfs /data:rw,noexec,nosuid,size=512m,uid=10001,gid=10001,mode=0700 \
+            --env BOOTSTRAP_TOKEN=ci-smoke-test-only \
+            --health-interval=1s --health-start-period=1s --health-retries=30 \
+            presence-monitor:ci)"
+          trap 'docker logs "$container"; docker rm --force "$container"' EXIT
+          for attempt in $(seq 1 40); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container")"
+            if [[ "$health" == healthy ]]; then break; fi
+            if [[ "$health" == unhealthy ]]; then exit 1; fi
+            sleep 1
+          done
+          [[ "$health" == healthy ]]
+          docker exec "$container" python -c '
+          import json
+          import urllib.request
+          base = "http://127.0.0.1:8080"
+          assert json.load(urllib.request.urlopen(base + "/readyz", timeout=5))["ok"]
+          page = urllib.request.urlopen(base + "/", timeout=5)
+          assert page.status == 200 and "text/html" in page.headers["Content-Type"]
+          assert b"<html" in page.read().lower()
+          '
       - name: Scan container for fixable critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

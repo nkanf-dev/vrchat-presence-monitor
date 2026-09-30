@@ -14,6 +14,7 @@ Never commit a real database, Cookie, raw response, friend list, access code, co
 python3 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 npm ci --prefix web --ignore-scripts --no-audit --no-fund
+npm ci --prefix infra/r2-backup-worker --ignore-scripts --no-audit --no-fund
 ```
 
 Run the same checks as CI before opening a pull request:
@@ -22,9 +23,17 @@ Run the same checks as CI before opening a pull request:
 npm --prefix web run check
 npm --prefix web test
 npm --prefix web run build
+npm --prefix infra/r2-backup-worker run check
+npm --prefix infra/r2-backup-worker test
 .venv/bin/python -m unittest discover -s tests -v
 docker compose config --quiet
 ```
+
+Keep the R2 backup Worker's Wrangler dependency on an exact stable 4.x version,
+with matching declarations and resolved version in `package-lock.json`. Review
+upstream release notes and the transitive dependency changes when updating it;
+the Worker policy test checks pinning and lockfile consistency without duplicating
+the current patch version.
 
 Python dependency inputs live in `requirements.in` and `requirements-dev.in`. Regenerate both hash-locked outputs with the recorded uv version and a universal Python 3.11 resolution; do not hand-edit package or hash lines:
 

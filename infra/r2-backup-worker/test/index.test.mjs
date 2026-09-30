@@ -805,7 +805,17 @@ test("toolchain, binding, lifecycle, and append-only source policy stay pinned",
     test: "node --test test/*.test.mjs",
     deploy: "wrangler deploy",
   });
-  assert.deepEqual(packageJson.devDependencies, { wrangler: "4.127.0" });
+  // Keep the toolchain exactly pinned without duplicating each dependency update.
+  assert.deepEqual(Object.keys(packageJson.devDependencies), ["wrangler"]);
+  assert.match(packageJson.devDependencies.wrangler, /^4\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  const packageLock = JSON.parse(
+    readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(packageLock.packages[""].devDependencies, packageJson.devDependencies);
+  assert.equal(
+    packageLock.packages["node_modules/wrangler"].version,
+    packageJson.devDependencies.wrangler,
+  );
 
   const wrangler = JSON.parse(
     readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
