@@ -29,6 +29,9 @@ updates:
       include: scope
   - package-ecosystem: github-actions
     directory: /
+    groups:
+      codeql-actions:
+        patterns: ["github/codeql-action/*"]
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
