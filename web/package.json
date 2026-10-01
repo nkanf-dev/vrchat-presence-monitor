@@ -19,7 +19,7 @@
     "echarts": "6.1.0",
     "lucide-react": "1.48.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8",
+    "react-dom": "19.3.0",
     "react-grid-layout": "2.2.4",
     "zod": "4.6.5"
   },
@@ -30,7 +30,7 @@
     "@testing-library/user-event": "14.6.6",
     "@types/node": "26.6.3",
     "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.5",
+    "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
     "jsdom": "26.1.0",
     "oxlint": "1.80.0",
